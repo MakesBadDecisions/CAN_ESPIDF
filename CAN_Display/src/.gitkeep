@@ -1,0 +1,2 @@
+// This file exists to satisfy PlatformIO's requirement for a src/ folder.
+// The actual application entry point is in main/main.c (ESP-IDF convention).
