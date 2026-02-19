@@ -129,9 +129,19 @@ static esp_err_t send_frame(comm_msg_type_t type, const void *payload, uint16_t 
     // Queue for TX
     if (xQueueSend(s_ctx.tx_queue, &frame, pdMS_TO_TICKS(10)) != pdTRUE) {
         s_ctx.stats.tx_errors++;
+        SYS_LOGW(TAG, "TX queue full, dropped type=0x%02X", (uint8_t)type);
         return ESP_ERR_TIMEOUT;
     }
-    
+
+    // Heartbeat TX is high-frequency — log at VERBOSE to avoid flooding
+    if ((comm_msg_type_t)type == MSG_HEARTBEAT) {
+        SYS_LOGV(TAG, "UART TX -> type=0x%02X seq=%u payload=%u bytes",
+                 header.msg_type, header.sequence, payload_len);
+    } else {
+        SYS_LOGD(TAG, "UART TX -> type=0x%02X seq=%u payload=%u bytes",
+                 header.msg_type, header.sequence, payload_len);
+    }
+
     return ESP_OK;
 }
 
@@ -169,28 +179,41 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
     
     s_ctx.stats.rx_frames++;
     s_ctx.stats.last_rx_tick = xTaskGetTickCount();
-    
+
     // Update link state
+    if (s_ctx.state != COMM_LINK_CONNECTED) {
+        SYS_LOGI(TAG, "Link UP - first frame from Display");
+    }
     s_ctx.state = COMM_LINK_CONNECTED;
-    
+
+    // Heartbeat RX is high-frequency — log at VERBOSE to avoid flooding
+    if ((comm_msg_type_t)header.msg_type == MSG_HEARTBEAT) {
+        SYS_LOGV(TAG, "UART RX <- type=0x%02X seq=%u payload=%u bytes",
+                 header.msg_type, header.sequence, header.payload_len);
+    } else {
+        SYS_LOGD(TAG, "UART RX <- type=0x%02X seq=%u payload=%u bytes",
+                 header.msg_type, header.sequence, header.payload_len);
+    }
+
     // Handle message types
     const uint8_t *payload = (header.payload_len > 0) ? &data[COMM_HEADER_SIZE] : NULL;
-    
+
     switch ((comm_msg_type_t)header.msg_type) {
         case MSG_HEARTBEAT:
-            // Peer heartbeat - link is alive
+            SYS_LOGV(TAG, "Heartbeat from Display Node");
             break;
-            
+
         case MSG_CONFIG_CMD:
         case MSG_LOG_CONTROL:
-            // Dispatch to registered callback
+            SYS_LOGI(TAG, "Config cmd 0x%02X from Display, payload=%u bytes",
+                     header.msg_type, header.payload_len);
             if (s_ctx.cmd_callback) {
                 s_ctx.cmd_callback((comm_msg_type_t)header.msg_type, payload, header.payload_len);
             }
             break;
-            
+
         default:
-            SYS_LOGD(TAG, "Unhandled msg type: 0x%02X", header.msg_type);
+            SYS_LOGW(TAG, "Unhandled msg type: 0x%02X seq=%u", header.msg_type, header.sequence);
             break;
     }
 }
@@ -378,14 +401,16 @@ esp_err_t comm_link_start(void)
     }
     
     // Create TX task
-    ret = xTaskCreate(tx_task, "comm_tx", 2048, NULL, 5, NULL);
+    // Stack must accommodate tx_frame_t (~1037 bytes) local on stack in send_frame()
+    ret = xTaskCreate(tx_task, "comm_tx", 4096, NULL, 5, NULL);
     if (ret != pdPASS) {
         s_ctx.running = false;
         return ESP_ERR_NO_MEM;
     }
-    
+
     // Create heartbeat task
-    ret = xTaskCreate(heartbeat_task, "comm_hb", 2048, NULL, 4, &s_ctx.hb_task);
+    // Stack must accommodate tx_frame_t (~1037 bytes) via send_frame() call chain
+    ret = xTaskCreate(heartbeat_task, "comm_hb", 4096, NULL, 4, &s_ctx.hb_task);
     if (ret != pdPASS) {
         s_ctx.running = false;
         return ESP_ERR_NO_MEM;

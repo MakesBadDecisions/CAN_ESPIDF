@@ -29,7 +29,10 @@
 
 #define DISPLAY_WIDTH       480
 #define DISPLAY_HEIGHT      272
-#define DISPLAY_COLOR_DEPTH 16   // RGB565
+#define DISPLAY_COLOR_DEPTH 16      // RGB565
+#define DISPLAY_DATA_WIDTH  16      // RGB parallel data bus width (bits)
+#define DISPLAY_BITS_PER_PX 16      // Bits per pixel (RGB565 = 16)
+#define BOUNCE_BUFFER_LINES 8       // Bounce buffer height (must divide DISPLAY_HEIGHT evenly: 272/8=34)
 
 // ============================================================================
 // RGB Interface Pin Configuration (DIS06043H specific)
@@ -66,12 +69,15 @@
 // Backlight control
 #define PIN_BACKLIGHT   2   // GPIO_NUM_2
 
+// Panel enable (GPIO 38 - must be HIGH for display to work)
+#define PIN_PANEL_ENABLE  38  // GPIO_NUM_38
+
 // ============================================================================
 // Display Timing Parameters (from Elecrow wiki)
 // ============================================================================
 
-// Pixel clock 
-#define DISPLAY_FREQ_WRITE      8000000
+// Pixel clock (7MHz as per Elecrow Arduino_GFX example)
+#define DISPLAY_FREQ_WRITE      7000000
 
 // HSYNC timing
 #define HSYNC_POLARITY          0
@@ -104,11 +110,12 @@
 #define TOUCH_INT_PIN           36  // GPIO_NUM_36
 #define TOUCH_SPI_FREQ          1000000
 
-// Calibration values (raw ADC range)
-#define TOUCH_X_MIN             100
-#define TOUCH_X_MAX             4000
-#define TOUCH_Y_MIN             100
-#define TOUCH_Y_MAX             4000
+// Calibration values (from manufacturer calData: {229, 3696, 373, 3490, 0})
+#define TOUCH_X_MIN             229   // Maps to screen X max
+#define TOUCH_X_MAX             3696  // Maps to screen X min (inverted)
+#define TOUCH_Y_MIN             373   // Maps to screen Y min
+#define TOUCH_Y_MAX             3490  // Maps to screen Y max
+#define TOUCH_X_INVERTED        1     // X axis is inverted
 
 // ============================================================================
 // UART Communication Link to CAN Interface Node

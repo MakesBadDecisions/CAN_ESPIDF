@@ -4,8 +4,11 @@ idf_component_register(
     REQUIRES
         comm_link
         display_driver
+        touch_driver
         gauge_engine
         data_logger
         wifi_manager
         system
+        lvgl
+        ui
 )

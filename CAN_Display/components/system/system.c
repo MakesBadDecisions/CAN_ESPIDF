@@ -22,6 +22,14 @@ static const char *TAG = "sys";
 esp_err_t system_init(void)
 {
     ESP_LOGI(TAG, "System init - Display Node");
+
+    // -----------------------------------------------------------------------
+    // Per-component log levels
+    // Default is INFO. Bump comm_link to DEBUG so UART RX/TX frames, PID
+    // updates, heartbeats, and connection state changes are visible in serial
+    // during device-to-device comms testing.
+    // -----------------------------------------------------------------------
+    esp_log_level_set("comm_link", ESP_LOG_DEBUG);
     
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();

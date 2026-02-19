@@ -17,7 +17,8 @@ hardware without modifying application code.
 #include "dis08070h.h"
 
 // All components use the same defines:
-// DISPLAY_WIDTH, DISPLAY_HEIGHT, PIN_HSYNC, SD_CS_PIN, etc.
+// DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_DATA_WIDTH, DISPLAY_BITS_PER_PX,
+// BOUNCE_BUFFER_LINES, PIN_HSYNC, PIN_PANEL_ENABLE, SD_CS_PIN, etc.
 ```
 
 ## Display Panels
@@ -62,25 +63,25 @@ inter-node communication vary by model:
 ## Adding a New Display
 
 1. Create a new `.h` file named after the display model
-2. Follow the existing section layout:
-   - Device Identification
-   - Display Specifications (width, height, color depth)
-   - RGB Interface Pin Configuration
-   - Display Timing Parameters (HSYNC, VSYNC, pixel clock)
-   - I2C Configuration (touch controller)
-   - Hardware Interface Pins
-   - I2S Audio Pins
-   - SD Card SPI Pins
-   - LVGL Buffer Configuration
-   - Device Capabilities
+2. Define all required values — the display driver uses these directly with
+   no hardcoded values:
+   - Device Identification (`DEVICE_NAME`, `DEVICE_MODEL`)
+   - Display Specifications (`DISPLAY_WIDTH`, `DISPLAY_HEIGHT`, `DISPLAY_COLOR_DEPTH`, `DISPLAY_DATA_WIDTH`, `DISPLAY_BITS_PER_PX`)
+   - Driver Configuration (`BOUNCE_BUFFER_LINES` — must divide `DISPLAY_HEIGHT` evenly)
+   - RGB Interface Pins (`PIN_R0-R4`, `PIN_G0-G5`, `PIN_B0-B4`, `PIN_HSYNC`, `PIN_VSYNC`, `PIN_DE`, `PIN_PCLK`)
+   - Control Pins (`PIN_BACKLIGHT`, `PIN_PANEL_ENABLE` — use `-1` if not present)
+   - Display Timing (`DISPLAY_FREQ_WRITE`, `HSYNC_*`, `VSYNC_*`, `PCLK_*`, `DE_*`)
+   - Touch Configuration (SPI for XPT2046 or I2C for GT911)
+   - Hardware Interface Pins (UART, I2S, SD Card)
+   - Device Capabilities (`HAS_*`, `FLASH_SIZE_MB`, `PSRAM_SIZE_MB`)
 3. Update the build system to select the correct header
 
 ## Device Verification
 
-Each new display panel should be verified using the device test utility.
-The test checks:
+Each new display panel should be verified:
 - Flash and PSRAM sizes match header defines
 - Display initializes and shows test pattern
-- Touch controller responds on I2C
+- Touch controller responds (SPI for XPT2046 on 4.3", I2C for GT911 on 5"/7")
+- Touch calibration screen works correctly
 - SD card mount succeeds
 - All declared capabilities are functional

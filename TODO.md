@@ -44,9 +44,12 @@ UART link over USB-C cable between CAN interface and display.
 ### Phase 4: Display Node Core
 Basic gauge display on Elecrow CrowPanel.
 
-- [ ] **Display Driver HAL** - Abstract display interface
-- [ ] **Display Driver** - Elecrow CrowPanel driver (RGB parallel LCD, capacitive touch)
-- [ ] **Display Driver** - Panel support: 5" DIS07050 and 7" DIS08070H
+- [x] **Display Driver** - RGB parallel LCD with double FB, bounce buffers, VSYNC-synced anti-tearing
+- [x] **Display Driver** - CrowPanel 4.3" DIS06043H (480x272, primary target)
+- [x] **Touch Driver** - XPT2046 SPI touch on Core 0, LVGL indev, NVS calibration
+- [x] **LVGL Integration** - direct_mode, dirty area sync, SquareLine Studio UI
+- [x] **Comm Link** - UART RX/TX with PID data store, heartbeat, connection monitoring
+- [ ] **Display Driver** - Panel support: 5" DIS07050 and 7" DIS08070H (untested)
 - [ ] **Gauge Engine** - Basic gauge rendering (numeric, bar, sweep)
 - [ ] **Gauge Engine** - Layout management (configurable gauge arrangements)
 - [ ] **Gauge Engine** - Alert/warning thresholds with audio feedback (I2S)

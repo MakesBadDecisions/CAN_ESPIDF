@@ -6,14 +6,14 @@ The Display Node is one of two ESP32-S3 nodes in the CAN_ESPIDF system. It recei
 
 This node does NOT interact with the vehicle CAN bus directly. All vehicle data arrives from the CAN Interface Node over a wired UART link (USB-C cable). The Display Node is the only node in the system with WiFi, serving as the user-facing hub for configuration and log download.
 
-The Display Node hardware is an Elecrow CrowPanel -- a self-contained ESP32-S3 module with a built-in RGB parallel LCD, capacitive touch screen, SD card slot, and audio output. Two panels are supported: DIS08070H (7" 800x480) and DIS07050 (5" 800x480). Power is supplied at 5V from the CAN Interface Node over USB-C VBUS; no separate power supply is needed.
+The primary target hardware is the **Elecrow CrowPanel 4.3" (DIS06043H)** — an ESP32-S3-WROOM-1-N4R2 with 480x272 RGB parallel LCD, XPT2046 resistive touch (SPI), SD card slot, and I2S audio. Two larger panels are also supported: DIS07050 (5" 800x480) and DIS08070H (7" 800x480), both with capacitive GT911 touch (I2C).
 
 ### Responsibilities
 
 - Receive and parse UART messages from the CAN Interface Node
 - Maintain a local PID data store with the latest values and timestamps
-- Render configurable gauge layouts on the CrowPanel RGB parallel LCD at 60fps
-- Provide touch screen interaction for local configuration without WiFi
+- Render configurable gauge layouts on the CrowPanel RGB parallel LCD
+- Provide touch screen interaction for local configuration
 - Monitor critical values and trigger visual/audible alerts (overtemp, low oil pressure, etc.)
 - Log all received PID data to SD card as HPTuners-compatible CSV
 - Manage logging sessions (start/stop, file naming, file rotation)
@@ -26,12 +26,14 @@ The Display Node hardware is an Elecrow CrowPanel -- a self-contained ESP32-S3 m
 | Component | Directory | Purpose |
 |-----------|-----------|---------|
 | comm_link | `components/comm_link/` | UART receive handler, message parsing, connection health monitoring, PID data store |
-| devices | `components/devices/` | Per-device pin definitions and hardware config for each CrowPanel variant (DIS08070H, DIS07050) |
-| display_driver | `components/display_driver/` | RGB parallel LCD driver (Elecrow CrowPanel), framebuffer management, touch input |
+| devices | `components/devices/` | Per-device pin definitions and hardware config for each CrowPanel variant |
+| display_driver | `components/display_driver/` | RGB parallel LCD driver, LVGL integration, double-FB anti-tearing |
+| touch_driver | `components/touch_driver/` | XPT2046 resistive touch (SPI), Core 0 polling task, 4-corner calibration, NVS persistence |
+| ui | `components/ui/` | SquareLine Studio generated LVGL screens and widgets |
 | gauge_engine | `components/gauge_engine/` | Gauge rendering (numeric, bar, sweep/dial), layout management, alert/warning system |
 | data_logger | `components/data_logger/` | SD card CSV logging, session management, write buffering, file rotation |
 | wifi_manager | `components/wifi_manager/` | WiFi AP mode, HTTP server for log browsing/download, gauge config web UI, CAN node config proxy |
-| system | `components/system/` | Logging wrapper, NVS config storage, timing utilities, task management |
+| system | `components/system/` | Logging wrapper, NVS init, timing utilities |
 
 Shared definitions used by both nodes live in `../shared/`:
 
@@ -48,6 +50,7 @@ CAN_Display/
 ├── README.md
 ├── TODO.md
 ├── CMakeLists.txt
+├── platformio.ini
 ├── sdkconfig.defaults
 ├── partitions.csv
 ├── main/
@@ -55,308 +58,172 @@ CAN_Display/
 │   └── CMakeLists.txt
 └── components/
     ├── comm_link/          # UART RX/TX, PID data store
-    ├── devices/            # Per-panel pin definitions (DIS08070H, DIS07050)
-    ├── display_driver/     # RGB parallel LCD driver
+    ├── devices/            # Per-panel pin definitions (DIS06043H, DIS07050, DIS08070H)
+    ├── display_driver/     # RGB parallel LCD + LVGL (double FB, bounce buffers, VSYNC)
+    ├── touch_driver/       # XPT2046 SPI touch (Core 0 task, calibration, NVS)
+    ├── ui/                 # SquareLine Studio generated LVGL UI
     ├── gauge_engine/       # Gauge rendering and alerts
     ├── data_logger/        # SD card CSV logging
     ├── wifi_manager/       # WiFi AP, HTTP server, CAN node config proxy
-    └── system/             # Logging, NVS, timing, task helpers
+    ├── system/             # Logging, NVS, timing
+    └── lvgl/               # LVGL v8.3 library
 ```
 
 ## FreeRTOS Task Layout
 
-All tasks are created during boot in `main.c`. Core affinity and priorities are chosen to keep display rendering isolated on Core 1 while all I/O and communication tasks share Core 0.
+Tasks currently running in the firmware:
 
-| Task | Core | Priority | Period | Stack Size | Purpose |
-|------|------|----------|--------|------------|---------|
-| Display Render | 1 | 5 | 16ms (~60fps) | 8192 bytes | Gauge rendering, framebuffer push to display |
-| Comm Link | 0 | 4 | 5ms | 4096 bytes | UART RX processing, PID store update |
-| Data Logger | 0 | 3 | 50ms | 4096 bytes | Flush write buffer to SD card, session management |
-| WiFi/Config | 0 | 1 | 100ms | 4096 bytes | HTTP server for log download, gauge config, CAN node config proxy |
-| System Monitor | 0 | 0 | 1000ms | 2048 bytes | Heap usage, task watchdog, uptime, connection status |
+| Task | Core | Priority | Stack | Purpose |
+|------|------|----------|-------|---------|
+| `lvgl` | 1 | 3 | 16 KB | LVGL timer handler (rendering + input processing) |
+| `touch` | 0 | 2 | 4 KB | XPT2046 SPI polling, writes to volatile cache |
+| `comm_rx` | 0 | 4 | 4 KB | UART RX from CAN Interface Node |
 
-### Task Details
+Core 1 is dedicated to display rendering (LVGL + LCD bounce buffer DMA ISR).
+Touch SPI reads are isolated on Core 0 to prevent stalling the LCD DMA ISR.
 
-**Display Render Task (Core 1, Priority 5, 16ms)**
-- Pinned to Core 1 to guarantee uninterrupted frame rendering
-- Reads latest PID values from the shared PID data store (lock-free or mutex-protected)
-- Calls gauge_engine to render the active layout into the framebuffer
-- Pushes framebuffer to display via display_driver HAL (RGB parallel interface)
-- Processes touch input for local configuration (layout switching, alert ack, etc.)
-- Evaluates alert thresholds and triggers warning overlays
-- Must complete within 16ms to maintain 60fps; drops to 30fps if a frame overruns
+### Future Tasks (not yet implemented)
 
-**Comm Link Task (Core 0, Priority 4, 5ms)**
-- Highest priority on Core 0 to minimize latency on incoming PID data
-- UART RX interrupt places raw bytes into a receive buffer
-- Task reads complete frames from buffer, parses them via shared/comm_protocol definitions
-- Updates the PID data store with decoded values and receive timestamps
-- Monitors heartbeat messages; sets connection status flags on timeout
-- Sends CONFIG_CMD messages over UART TX to CAN node when requested (including proxied config from web UI)
+| Task | Core | Priority | Purpose |
+|------|------|----------|---------|
+| Data Logger | 0 | 3 | SD card CSV writes |
+| WiFi/Config | 0 | 1 | HTTP server for log download and config |
+| System Monitor | 0 | 0 | Heap usage, watchdog, health reporting |
 
-**Data Logger Task (Core 0, Priority 3, 50ms)**
-- Accumulates PID snapshots in a RAM ring buffer
-- Flushes buffer to SD card every 50ms (or when buffer hits threshold)
-- Manages CSV file headers, session start/stop, and file rotation
-- Uses double-buffering: one buffer fills while the other writes to SD
-- Gracefully handles SD card removal and reinsertion
+## Pin Assignments (CrowPanel 4.3" DIS06043H)
 
-**WiFi/Config Task (Core 0, Priority 1, 100ms)**
-- Starts WiFi AP on demand (button press, touch screen, or NVS config)
-- Runs lightweight HTTP server for log file browsing and download
-- Serves gauge configuration web UI (layout selection, PID assignment, alert thresholds)
-- Proxies CAN Interface Node configuration (settings sent over UART to CAN node)
-- Handles OTA firmware update endpoint (future)
-- Low priority -- yields to comm and logging tasks
+### RGB LCD (16-bit parallel)
+All 16 data lines + HSYNC/VSYNC/DE/PCLK — see `dis06043h.h` for full list.
 
-**System Monitor Task (Core 0, Priority 0, 1000ms)**
-- Reports free heap, minimum free heap, and per-task stack high water marks
-- Feeds the task watchdog timer
-- Logs connection status (UART link health, time since last heartbeat)
-- Monitors SD card usage and remaining space
-- Outputs periodic health summary to debug UART
-
-## Pin Assignments (Elecrow CrowPanel)
-
-Pin assignments on the CrowPanel are highly constrained. The RGB parallel display, touch controller, SD card, and audio are all wired internally on the CrowPanel PCB. Available GPIOs for external connections are very limited.
-
-Display pins (RGB parallel interface), backlight, and touch I2C pins are defined per-device in the `components/devices/` headers for each panel variant (DIS08070H and DIS07050).
-
-### UART - Inter-Node Communication (USB-C Cable)
-
+### Touch (XPT2046 SPI)
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| UART TX | TBD | To CAN Interface Node (config commands, proxied settings) |
-| UART RX | TBD | From CAN Interface Node (PID data, heartbeat) |
+| SCK | 12 | Shared SPI bus with SD card |
+| MOSI | 11 | Shared SPI bus with SD card |
+| MISO | 13 | Shared SPI bus with SD card |
+| CS | 0 | Touch chip select |
+| INT | 36 | Touch interrupt (active low) |
+
+### UART - Inter-Node Communication
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| UART1 TX | 17 | To CAN Interface Node RX (GPIO18) |
+| UART1 RX | 18 | From CAN Interface Node TX (GPIO17) |
+
+On the 4.3" panel, UART1 is on a dedicated HY2.0-4P connector, matching the
+CAN Interface Node pins for direct wiring.
 
 ### SD Card (SPI)
-
-SD card pins are defined in the per-device headers. Both panels use the same SPI pins:
-
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| MOSI | GPIO 11 | SPI bus |
-| MISO | GPIO 13 | SPI bus |
-| SCLK | GPIO 12 | SPI bus |
-| CS | GPIO 10 | Chip select |
+| MOSI | 11 | Shared SPI bus with touch |
+| MISO | 13 | Shared SPI bus with touch |
+| SCLK | 12 | Shared SPI bus with touch |
+| CS | 10 | SD card chip select |
 
-### Touch (I2C)
-
+### Backlight / Panel Enable
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| SDA | GPIO 19 | I2C bus (capacitive touch controller) |
-| SCL | GPIO 20 | I2C bus (capacitive touch controller) |
-
-### Debug / Misc
-
-| Signal | GPIO | Notes |
-|--------|------|-------|
-| UART TX | GPIO43 | USB-UART bridge (debug console, default S3) |
-| UART RX | GPIO44 | USB-UART bridge (debug console, default S3) |
-
-### Power
-
-The Display Node receives 5V power from the CAN Interface Node via USB-C VBUS. No separate power supply is needed.
+| Backlight | 2 | Active high |
+| Panel Enable | 38 | Must be HIGH for display to work |
 
 ## Boot Sequence
 
-Initialization proceeds in a strict order. Each stage must succeed before the next begins. Non-critical failures (SD card missing, display not detected) are logged but do not halt boot.
+The actual boot sequence as implemented in `main.c`:
 
 ```
 1. system_init()
-   - Initialize ESP-IDF logging
-   - Initialize NVS flash (user config storage)
-   - Load saved configuration (gauge layout, alert thresholds, WiFi settings)
-   - Start system timer
+   - Initialize NVS flash
+   - Print device info (chip, flash, PSRAM, MAC)
 
-2. display_driver_init()
-   - Select device config from devices/ based on build target or NVS
-   - Configure RGB parallel interface for CrowPanel LCD
-   - Initialize touch controller (I2C)
-   - Clear screen, show boot splash / CAN_ESPIDF logo
-   - [NON-CRITICAL: if display fails, system continues headless]
+2. display_init()
+   - Configure backlight and panel enable GPIOs
+   - Initialize RGB parallel LCD panel (double FB, bounce buffers, VSYNC)
+   - Initialize LVGL (direct_mode, register display driver)
+   - Create LVGL task on Core 1
+   - 100ms delay for LVGL task startup
 
-3. comm_link_init()
-   - Initialize UART peripheral for inter-node communication
-   - Configure UART RX/TX pins, baud rate, framing
-   - Allocate PID data store
-   - Begin listening for heartbeat from CAN Interface Node
+3. touch_init()
+   - Initialize SPI bus for XPT2046 (DMA disabled)
+   - Load calibration from NVS (or use header defaults)
+   - Start touch polling task on Core 0
+   - Register LVGL input device
 
-4. data_logger_init()
-   - Initialize SPI bus for SD card
-   - Mount FAT filesystem
-   - Scan existing log files, determine next session number
-   - Allocate write buffers
-   - [NON-CRITICAL: if SD card missing, logging disabled until inserted]
+4. Touch calibration check
+   - If no NVS calibration data: show 4-corner calibration screen
+   - User touches crosshairs at each corner
+   - Saves calibration to NVS for future boots
 
-5. gauge_engine_init()
-   - Load gauge layout from NVS config
-   - Initialize gauge state (smoothing filters, alert states)
-   - Link to PID data store from comm_link
+5. ui_init()
+   - Load SquareLine Studio generated UI screens
+   - (Requires display lock)
 
-6. wifi_manager_init()
-   - [DEFERRED: WiFi AP started only on demand, not at boot]
-   - Register HTTP server handlers (log browser, gauge config, CAN node config proxy)
-   - Prepare file listing for log directory
-
-7. Task creation
-   - Create all FreeRTOS tasks with assigned cores and priorities
-   - Display Render Task starts immediately
-   - Comm Link Task starts immediately (listening for UART RX)
-   - Data Logger Task starts in standby (waits for session start trigger)
-   - WiFi/Config Task starts in standby (waits for AP enable trigger)
-   - System Monitor Task starts immediately
+6. comm_link_init() + comm_link_start()
+   - Initialize UART peripheral
+   - Start RX task for incoming PID data
 ```
+
+Non-critical failures (touch, SD card) are logged but do not halt boot.
 
 ## Data Flow
 
 ```
-                    CAN Interface Node
-                           |
-                    UART (USB-C cable)
-                           |
-                           v
-                 ┌───────────────────┐
-                 │    Comm Link      │
-                 │   (UART RX)      │
-                 │                   │
-                 │  - Parse message  │
-                 │  - Validate CRC   │
-                 │  - Update PID     │
-                 │    data store     │
-                 └────────┬──────────┘
-                          |
-                 ┌────────┴──────────┐
-                 │   PID Data Store  │
-                 │  (shared memory)  │
-                 │                   │
-                 │  - Latest values  │
-                 │  - Timestamps     │
-                 │  - Stale flags    │
-                 └──┬─────────────┬──┘
-                    |             |
-           ┌────────┴───┐   ┌────┴──────────┐
-           │  Gauge     │   │  Data Logger   │
-           │  Engine    │   │               │
-           │            │   │  - Snapshot    │
-           │  - Render  │   │    PID store   │
-           │    gauges  │   │  - Buffer row  │
-           │  - Check   │   │  - Flush to   │
-           │    alerts  │   │    SD card     │
-           │  - Touch   │   │               │
-           │    input   │   │  Output:       │
-           │  - Push to │   │  CSV file on   │
-           │    display │   │  SD card       │
-           └────────────┘   └───────────────┘
-                                   |
-                                   v
-                         ┌─────────────────┐
-                         │  WiFi Manager   │
-                         │                 │
-                         │  - Browse logs  │
-                         │  - Download CSV │
-                         │  - Configure    │
-                         │    gauges       │
-                         │  - Proxy CAN    │
-                         │    node config  │
-                         │    (over UART)  │
-                         └─────────────────┘
+                CAN Interface Node
+                       |
+                UART (USB-C cable)
+                       |
+                       v
+             ┌───────────────────┐
+             │    Comm Link      │
+             │   (UART RX)      │
+             │                   │
+             │  - Parse message  │
+             │  - Validate CRC   │
+             │  - Update PID     │
+             │    data store     │
+             └────────┬──────────┘
+                      |
+             ┌────────┴──────────┐
+             │   PID Data Store  │
+             │  (shared memory)  │
+             └──┬─────────────┬──┘
+                |             |
+       ┌────────┴───┐   ┌────┴──────────┐
+       │  Gauge     │   │  Data Logger   │
+       │  Engine    │   │  (TODO)        │
+       │  + LVGL UI │   │               │
+       │            │   │  Output:       │
+       │  Output:   │   │  CSV on SD     │
+       │  Display   │   │               │
+       └────────────┘   └───────────────┘
 ```
-
-### PID Data Store Design
-
-The PID data store is a fixed-size array indexed by PID ID. Each entry contains:
-
-```c
-typedef struct {
-    float value;            // Decoded value in display units
-    int64_t timestamp_us;   // esp_timer_get_time() when received
-    uint8_t stale;          // Set if no update within timeout (UART heartbeat lost)
-    uint8_t valid;          // Set after first successful receive
-} pid_data_entry_t;
-```
-
-Concurrency: The Comm Link Task writes entries and the Display Render / Data Logger tasks read them. Access is protected by either:
-- A per-entry spinlock (minimal contention, no priority inversion), or
-- Atomic copy of the 12-byte struct (if platform supports it), or
-- A single mutex with short hold time
-
-The design will be finalized during implementation. The key constraint is that the Display Render Task on Core 1 must never block for more than ~100us waiting on a lock held by Core 0.
-
-## HPTuners CSV Format
-
-Log files are written in a format compatible with HPTuners and VCM Scanner for import and analysis. The CSV structure is:
-
-```
-Timestamp,Engine RPM,Coolant Temp (F),Oil Pressure (psi),Boost (psi),AFR,...
-0.000,850.0,185.2,42.5,0.0,14.7,...
-0.050,855.0,185.3,42.4,0.0,14.7,...
-0.100,860.0,185.4,42.3,0.1,14.6,...
-```
-
-- First row: column headers with PID name and unit
-- Timestamp column: seconds since session start, 3 decimal places
-- One row per logging interval (50ms = 20 rows/second)
-- Only actively-polled PIDs are included as columns
-- File naming: `LOG_YYYYMMDD_HHMMSS_NNN.csv` (NNN = session counter)
-
-## Alert / Warning System
-
-The gauge engine evaluates alert thresholds on every render cycle. Alert definitions are stored in NVS and configurable via the WiFi web UI or touch screen.
-
-| Alert Level | Behavior |
-|-------------|----------|
-| NORMAL | Standard gauge rendering |
-| WARNING | Gauge value highlighted (e.g., yellow), optional border flash |
-| CRITICAL | Gauge value in red, full-screen flash overlay, optional buzzer |
-
-Default alert thresholds (user-configurable):
-
-| Parameter | Warning | Critical |
-|-----------|---------|----------|
-| Coolant Temp | > 220F | > 240F |
-| Oil Pressure | < 25 psi | < 15 psi |
-| Trans Temp | > 200F | > 220F |
-| Boost Pressure | > 15 psi | > 20 psi |
-| Battery Voltage | < 13.0V | < 12.0V |
 
 ## Build Instructions
 
-The Display Node is an independent ESP-IDF project. It references shared components from `../shared/`.
-
-### Prerequisites
-
-- ESP-IDF v5.x installed and configured
-- ESP32-S3 target support
-- Python 3.8+ (for ESP-IDF tools)
+This project uses **PlatformIO** with the ESP-IDF framework.
 
 ### Build
 
 ```bash
-cd CAN_Display
-idf.py set-target esp32s3
-idf.py build
+pio run -e display_node
 ```
 
 ### Flash and Monitor
 
 ```bash
-idf.py -p COMX flash monitor
+pio run -e display_node -t upload && pio device monitor
 ```
 
-Replace `COMX` with the actual serial port for the Display Node (Elecrow CrowPanel USB port).
+### Full Clean Build
+
+Required after changing `sdkconfig.defaults`:
+
+```bash
+pio run -e display_node -t fullclean && pio run -e display_node
+```
 
 ### Configuration
 
 ```bash
-idf.py menuconfig
-```
-
-Project-specific options will be under `CAN_ESPIDF Display Node` in the menuconfig tree (once sdkconfig.defaults and Kconfig files are created).
-
-### Clean Build
-
-```bash
-idf.py fullclean
-idf.py build
+pio run -e display_node -t menuconfig
 ```

@@ -2,7 +2,7 @@
 
 Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 
-## User Workflow (Connect → Configure → Monitor)
+## User Workflow (Connect -> Configure -> Monitor)
 
 The primary user interaction flow:
 
@@ -43,6 +43,7 @@ The primary user interaction flow:
 - [x] Add unit dropdown (`ui_unnitdropdown2`)
 - [x] Add gauge value label (`ui_gaugeText1`)
 - [x] Add `connectCAN` event handler stub
+- [x] Configure lv_conf.h for ESP32-S3 with PSRAM framebuffer
 - [ ] Implement `connectCAN()` -- trigger vehicle scan via comm_link
 - [ ] Populate PID dropdown from supported PIDs list
 - [ ] Populate unit dropdown based on selected PID
@@ -52,19 +53,18 @@ The primary user interaction flow:
 - [ ] Add status label for connection state (DISCONNECTED/CONNECTING/CONNECTED)
 - [ ] Add VIN display area for vehicle identification
 - [ ] Add multi-gauge layout screen with 2-6 configurable gauges
-- [ ] Configure lv_conf.h for ESP32-S3 with PSRAM framebuffer
 
 ## system/
 
-- [ ] Logging wrapper -- thin layer over `esp_log` with project-wide tag conventions
-- [ ] Timing utilities -- `millis()` / `micros()` equivalents using `esp_timer`
+- [x] Logging wrapper -- `SYS_LOGE/W/I/D/V` macros over `esp_log`
+- [x] `system_init()` -- NVS flash init
+- [x] `sys_print_device_info()` -- chip, flash, PSRAM, MAC
+- [x] `sys_time_us()` / `sys_time_ms()` -- timing utilities
+- [x] `sys_get_free_heap()` -- heap monitoring
 - [ ] NVS config module -- load/save gauge layout, alert thresholds, WiFi credentials
 - [ ] NVS config module -- define default config values for first boot
-- [ ] Task management helpers -- task creation wrapper with core affinity, priority, stack size
 - [ ] Task watchdog registration for all tasks
 - [ ] System health struct -- heap free, min heap, uptime, connection state
-- [ ] Kconfig entries for stack sizes, task priorities, timer periods
-- [ ] `sdkconfig.defaults` -- target esp32s3, partition table, flash size, PSRAM
 
 ## comm_link/
 
@@ -74,11 +74,11 @@ The primary user interaction flow:
 - [x] Message dispatcher -- route parsed messages by type using shared/comm_protocol definitions
 - [x] PID data store -- fixed-size array (64 entries), holds latest value + timestamp
 - [x] PID data store -- mutex protection for cross-core access
-- [ ] PID data store -- stale detection (mark entries not updated within timeout)
 - [x] Heartbeat send -- TX heartbeat every 500ms
 - [x] Heartbeat monitor -- track last RX timestamp, set disconnected flag after 2s timeout
 - [x] Connection status API -- `comm_link_get_state()`, `comm_link_get_stats()`
 - [x] TX path -- send frames to CAN Interface Node over UART
+- [ ] PID data store -- stale detection (mark entries not updated within timeout)
 - [ ] Send vehicle scan request -- MSG_CONFIG_CMD to trigger ECU/VIN/PID scan
 - [ ] Handle scan response -- MSG_SCAN_STATUS with ECU IDs, VIN, supported PIDs
 - [ ] Send poll list update -- MSG_CONFIG_CMD with selected PID list
@@ -88,95 +88,98 @@ The primary user interaction flow:
 
 ## display_driver/
 
-- [ ] Display HAL interface -- `display_init()`, `display_flush()`, `display_set_backlight()`
-- [ ] HAL interface -- `display_get_width()`, `display_get_height()`, `display_get_buffer()`
-- [ ] Framebuffer allocation -- double buffer in PSRAM (800x480 RGB565 = ~750KB per buffer)
-- [ ] RGB parallel LCD driver -- configure ESP-IDF RGB panel interface using device header pin definitions
-- [ ] Elecrow CrowPanel 5" driver (DIS07050) -- init with correct timing parameters from device header
-- [ ] Elecrow CrowPanel 7" driver (DIS08070H) -- init with correct timing parameters from device header
-- [ ] GT911 touch controller driver -- I2C init, read touch points, report to gauge engine
+- [x] Display HAL interface -- `display_init()`, `display_clear()`, `display_lock()`/`display_unlock()`
+- [x] RGB parallel LCD driver -- ESP-IDF `esp_lcd_panel_rgb` with device header pin definitions
+- [x] Double framebuffer in PSRAM (`num_fbs=2`) with LVGL `direct_mode`
+- [x] Bounce buffers in SRAM (8 lines, 480x8 pixels)
+- [x] VSYNC-synced buffer swap via binary semaphore + ISR callback
+- [x] Dirty area synchronization between double buffers in flush callback
+- [x] LVGL task on Core 1 (Priority 3, 16KB stack)
+- [x] Backlight and panel enable GPIO control
+- [x] Device selection via compile-time `DEVICE_DIS*` define
+- [x] sdkconfig: 64B cache line, 80MHz PSRAM, ISR IRAM safe, SPIRAM fetch/rodata
+- [x] CrowPanel 4.3" (DIS06043H) -- 480x272 RGB LCD
+- [ ] CrowPanel 5" (DIS07050) -- 800x480 RGB LCD (untested)
+- [ ] CrowPanel 7" (DIS08070H) -- 800x480 RGB LCD (untested)
 - [ ] Backlight PWM control -- LEDC peripheral for brightness adjustment
-- [ ] Device selection -- compile-time include of correct device header
-- [ ] Color format abstraction -- RGB565 assumed, but keep format configurable
-- [ ] Boot splash screen -- render CAN_ESPIDF logo / text during initialization
+- [ ] Boot splash screen -- render CAN_ESPIDF logo during initialization
+
+## touch_driver/
+
+- [x] XPT2046 SPI driver -- read X/Y/Z1 channels, 12-bit ADC
+- [x] SPI bus init -- SPI2_HOST, DMA disabled, 1MHz clock
+- [x] Touch polling task on Core 0 (Priority 2, 4KB stack)
+- [x] Volatile cache struct -- Core 0 writes, Core 1 reads (zero SPI in LVGL callback)
+- [x] LVGL input device registration (under display lock)
+- [x] Coordinate mapping -- raw ADC to screen coordinates with calibration
+- [x] 4-corner calibration screen -- crosshair targets, 5-reading average, auto inversion detect
+- [x] NVS persistence -- load/save calibration data (namespace "touch_cal")
+- [x] `touch_clear_calibration()` -- erase NVS, force recalibration
+- [x] Fallback to header defaults when no NVS data
+- [ ] Touch filtering -- debounce or median filter for noisy readings
+- [ ] Long-press detection for calibration re-entry from running UI
 
 ## gauge_engine/
 
 - [ ] Gauge type definitions -- numeric, horizontal bar, vertical bar, sweep (radial dial)
 - [ ] Gauge struct -- PID binding, position, size, min/max range, label, unit string
-- [ ] Layout struct -- array of gauge definitions, screen arrangement, background color
+- [ ] Layout struct -- array of gauge definitions, screen arrangement
 - [ ] Layout storage -- save/load layouts to/from NVS
-- [ ] Numeric gauge renderer -- large value text, label, unit, optional min/max indicators
-- [ ] Bar gauge renderer -- filled rectangle proportional to value, tick marks, color gradient
+- [ ] Numeric gauge renderer -- large value text, label, unit
+- [ ] Bar gauge renderer -- filled rectangle, tick marks, color gradient
 - [ ] Sweep gauge renderer -- arc/dial with needle, tick marks, value label
-- [ ] Value smoothing -- low-pass filter or exponential moving average for jitter reduction
-- [ ] Alert threshold evaluation -- compare current value against WARNING and CRITICAL limits
-- [ ] Alert rendering -- color changes (normal/yellow/red), border flash, full-screen overlay
+- [ ] Value smoothing -- low-pass filter or EMA for jitter reduction
+- [ ] Alert threshold evaluation -- compare against WARNING and CRITICAL limits
+- [ ] Alert rendering -- color changes (normal/yellow/red), border flash
 - [ ] Alert audio feedback -- I2S audio or GPIO buzzer on CRITICAL alerts
-- [ ] Layout manager -- switch between layouts (touch input or auto based on driving mode)
-- [ ] Render pipeline -- clear framebuffer, draw all gauges in layout, push to display
-- [ ] Font rendering -- embedded bitmap font or anti-aliased font for value/label text
-- [ ] Stale value indication -- dim or gray out gauges whose PID data has gone stale
 
 ## data_logger/
 
 - [ ] SD card initialization -- SPI bus config using device header SD pins, mount FAT filesystem
-- [ ] SD card detection -- card detect GPIO or mount/unmount retry logic
+- [ ] SD card detection -- card detect or mount/unmount retry logic
 - [ ] Session management -- start session (create new CSV), stop session (flush and close)
-- [ ] Session auto-naming -- `LOG_YYYYMMDD_HHMMSS_NNN.csv` format (RTC or uptime-based)
-- [ ] CSV header generation -- build header row from list of actively-polled PIDs
+- [ ] Session auto-naming -- `LOG_YYYYMMDD_HHMMSS_NNN.csv` format
+- [ ] CSV header generation -- build header row from actively-polled PIDs
 - [ ] CSV row writing -- snapshot PID data store, format values, write row with timestamp
 - [ ] Write buffering -- RAM ring buffer, flush to SD every 50ms or on threshold
-- [ ] Double buffering -- fill one buffer while writing the other to avoid blocking
-- [ ] File rotation -- close current file and start new one at configurable size limit
-- [ ] Storage monitoring -- track SD card free space, warn when low, stop logging when full
-- [ ] Graceful SD removal -- detect unmount, buffer remaining data, resume on reinsert
-- [ ] Session metadata -- write vehicle info (VIN, ECU) at top of file or in companion file
-- [ ] Log trigger modes -- manual start/stop, auto-start on first PID data, ignition-based
+- [ ] File rotation -- close and start new at configurable size limit
+- [ ] Storage monitoring -- track SD card free space, warn when low
 
 ## wifi_manager/
 
-- [ ] WiFi AP initialization -- configure SSID, password, channel, max connections
-- [ ] AP on-demand start -- enable AP via touch button or NVS setting, not always-on at boot
+- [ ] WiFi AP initialization -- configure SSID, password, channel
+- [ ] AP on-demand start -- enable AP via touch button or NVS setting
 - [ ] HTTP server -- lightweight httpd for file serving and API endpoints
-- [ ] Log file browser -- HTML page listing all CSV files on SD card with size and date
-- [ ] Log file download -- serve CSV files for direct download via browser
-- [ ] Log file deletion -- delete individual files or clear all logs via web UI
-- [ ] Gauge config UI -- HTML page to select layout, assign PIDs to gauges, set ranges
-- [ ] Alert config UI -- HTML page to set warning/critical thresholds per PID
-- [ ] CAN node config proxy -- relay PID poll list, baud rate, scan commands to CAN node over UART
-- [ ] CAN node status page -- show CAN bus state, error counts, supported PIDs (proxied over UART)
-- [ ] Config save endpoint -- POST handler to save gauge/alert config to NVS
-- [ ] System status page -- show connection state, heap, uptime, SD usage, active PIDs
-- [ ] mDNS -- advertise `can-espidf.local` for easy browser access
-- [ ] OTA update endpoint -- firmware upload via web browser (future)
-- [ ] WiFi AP auto-disable -- shut down AP after configurable idle timeout to save power
+- [ ] Log file browser -- HTML page listing CSV files on SD card
+- [ ] Log file download -- serve CSV files for direct download
+- [ ] Gauge config UI -- HTML page for layout, PID assignments, alert thresholds
+- [ ] CAN node config proxy -- relay settings to CAN node over UART
+- [ ] System status page -- connection state, heap, SD usage
 
 ## devices/
 
-- [x] Create DIS06043H (4.3") device header with pin assignments (UART1 on GPIO17/18)
+- [x] Create DIS06043H (4.3") device header with pin assignments
 - [x] Create device.h selector header for build-time device selection
 - [x] Create custom board JSON for CrowPanel 4.3" (4MB Flash, 2MB Quad PSRAM)
 - [ ] Verify DIS07050 (5") device header pin assignments against actual hardware
 - [ ] Verify DIS08070H (7") device header pin assignments against actual hardware
-- [ ] Create device_test utility for display panel verification
 
 ## main/
 
-- [ ] `main.c` -- app_main entry point, call init functions in boot sequence order
-- [ ] `main.c` -- create all FreeRTOS tasks with correct core, priority, stack size
-- [ ] `main.c` -- error handling for init failures (continue with degraded functionality)
-- [ ] `CMakeLists.txt` -- register all components, link shared components from `../shared/`
-- [ ] `partitions.csv` -- partition table (app, NVS, optional OTA partitions)
+- [x] `main.c` -- app_main entry point with boot sequence
+- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link
+- [x] `main.c` -- error handling for init failures (continue with degraded functionality)
+- [x] `CMakeLists.txt` -- register all components
+- [ ] `partitions.csv` -- verify partition table for OTA support
 
 ## Integration and Testing
 
 - [ ] Loopback test -- comm_link receives simulated UART messages, verify PID store updates
-- [ ] Display test -- render all gauge types with known values on CrowPanel, visual verification
-- [ ] Touch test -- verify GT911 touch input registers correctly on both panel sizes
+- [ ] Display test -- render all gauge types with known values, visual verification
+- [ ] Touch test -- verify XPT2046 touch input and calibration accuracy
 - [ ] Logger test -- run logging session, verify CSV output matches HPTuners import format
 - [ ] WiFi test -- connect to AP, browse logs, download file, verify file integrity
 - [ ] Alert test -- inject out-of-range values, verify warning and critical alert behavior
 - [ ] Stress test -- sustained 20Hz PID updates across 30+ PIDs, verify no dropped data
-- [ ] Endurance test -- 1-hour continuous logging session, verify no file corruption or heap leak
-- [ ] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data end-to-end
+- [ ] Endurance test -- 1-hour continuous logging, verify no file corruption or heap leak
+- [ ] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data

@@ -15,6 +15,10 @@
 #include "freertos/task.h"
 #include "system.h"
 #include "comm_link.h"
+#include "display_driver.h"
+#include "touch_driver.h"
+#include "lvgl.h"
+#include "ui.h"
 
 void app_main(void)
 {
@@ -28,7 +32,42 @@ void app_main(void)
     // Print device info to verify hardware
     sys_print_device_info();
 
-    // Phase 3: Initialize comm_link (UART RX from CAN Interface node)
+    // Phase 1: Initialize display and LVGL
+    ret = display_init();
+    if (ret != ESP_OK) {
+        SYS_LOGE("Display init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // Give LVGL task time to start
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Phase 2: Initialize touch input (SPI + task on Core 0 + LVGL indev)
+    ret = touch_init();
+    if (ret != ESP_OK) {
+        SYS_LOGE("Touch init failed: %s", esp_err_to_name(ret));
+        // Continue without touch — display still works
+    }
+
+    // Phase 3: Touch calibration check
+    if (ret == ESP_OK && !touch_has_calibration()) {
+        SYS_LOGI("No touch calibration found, starting calibration...");
+        if (display_lock(5000)) {
+            touch_start_calibration();
+            display_unlock();
+        }
+    }
+
+    // Phase 4: Initialize SquareLine Studio UI
+    if (display_lock(1000)) {
+        ui_init();
+        SYS_LOGI("UI initialized");
+        display_unlock();
+    } else {
+        SYS_LOGE("Failed to acquire display lock for UI init");
+    }
+
+    // Phase 5: Initialize comm_link (UART RX from CAN Interface node)
     ret = comm_link_init();
     if (ret != ESP_OK) {
         SYS_LOGE("Comm link init failed: %s", esp_err_to_name(ret));
@@ -44,7 +83,7 @@ void app_main(void)
     SYS_LOGI("=== Display Node Ready ===");
     SYS_LOGI("Free heap: %lu bytes", (unsigned long)sys_get_free_heap());
 
-    // TODO: Phase 4 - Initialize display_driver, gauge_engine
+    // TODO: Initialize gauge_engine
     // TODO: Phase 5 - Initialize data_logger (SD card)
     // TODO: Phase 6 - Initialize wifi_manager (WiFi AP for config + log download)
 

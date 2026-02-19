@@ -12,7 +12,7 @@
  */
 
 /* clang-format off */
-#if 0 /*Set it to "1" to enable content*/
+#if 1 /*Set it to "1" to enable content*/
 
 #ifndef LV_CONF_H
 #define LV_CONF_H
@@ -85,13 +85,10 @@
 
 /*Use a custom tick source that tells the elapsed time in milliseconds.
  *It removes the need to manually update the tick with `lv_tick_inc()`)*/
-#define LV_TICK_CUSTOM 0
+#define LV_TICK_CUSTOM 1
 #if LV_TICK_CUSTOM
-    #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"         /*Header for the system time function*/
-    #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())    /*Expression evaluating to current system time in ms*/
-    /*If using lvgl as ESP32 component*/
-    // #define LV_TICK_CUSTOM_INCLUDE "esp_timer.h"
-    // #define LV_TICK_CUSTOM_SYS_TIME_EXPR ((esp_timer_get_time() / 1000LL))
+    #define LV_TICK_CUSTOM_INCLUDE "esp_timer.h"
+    #define LV_TICK_CUSTOM_SYS_TIME_EXPR ((esp_timer_get_time() / 1000LL))
 #endif   /*LV_TICK_CUSTOM*/
 
 /*Default Dot Per Inch. Used to initialize default sizes such as widgets sized, style paddings.
@@ -371,7 +368,7 @@
 #define LV_FONT_MONTSERRAT_22 0
 #define LV_FONT_MONTSERRAT_24 0
 #define LV_FONT_MONTSERRAT_26 0
-#define LV_FONT_MONTSERRAT_28 0
+#define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_30 0
 #define LV_FONT_MONTSERRAT_32 0
 #define LV_FONT_MONTSERRAT_34 0
@@ -742,7 +739,7 @@
 *==================*/
 
 /*Enable the examples to be built with the library*/
-#define LV_BUILD_EXAMPLES 1
+#define LV_BUILD_EXAMPLES 0
 
 /*===================
  * DEMO USAGE

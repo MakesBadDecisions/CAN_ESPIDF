@@ -29,6 +29,19 @@ static const char *TAG = "system";
 esp_err_t system_init(void)
 {
     SYS_LOGI(TAG, "System initializing...");
+
+    // -----------------------------------------------------------------------
+    // Per-component log levels
+    // Default is INFO (set in sdkconfig.defaults via CONFIG_LOG_DEFAULT_LEVEL_INFO).
+    // Bump diagnostic components to DEBUG so CAN TX/RX and UART TX/RX frames
+    // are visible in serial without enabling DEBUG globally (which would flood
+    // the output with IDF driver verbosity).
+    // -----------------------------------------------------------------------
+    esp_log_level_set("can_driver", ESP_LOG_DEBUG);
+    esp_log_level_set("obd2",       ESP_LOG_DEBUG);
+    esp_log_level_set("comm_link",  ESP_LOG_DEBUG);
+    esp_log_level_set("mcp2515",    ESP_LOG_DEBUG);
+    esp_log_level_set("poll_engine",ESP_LOG_DEBUG);
     
     // NVS is already initialized in main.c before this is called
     // Just verify it's working

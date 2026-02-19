@@ -2,35 +2,40 @@
 
 ## Purpose
 
-Same role as the CAN interface node's system component: logging, NVS config, timing, and task helpers. Shared API, separate instance per node.
+Core system services for the display node: NVS initialization, logging macros,
+timing utilities, and device info reporting.
 
-This is intentionally a near-duplicate of the CAN node's system component. Both nodes need the same foundational services. In the future, this could be extracted to `shared/` if the implementations are identical.
+## API
 
-## Modules
+```c
+#include "system.h"
 
-- **sys_log** - Structured logging via `esp_log` with per-tag level control
-- **sys_config** - NVS key-value storage for persistent settings
-- **sys_time** - Overflow-safe timing utilities
-- **sys_task** - FreeRTOS task creation helpers
+esp_err_t system_init(void);         // Init NVS flash
+void      sys_print_device_info(void); // Print chip, flash, PSRAM, MAC
+int64_t   sys_time_us(void);         // Microsecond timestamp
+uint32_t  sys_time_ms(void);         // Millisecond timestamp
+uint32_t  sys_get_free_heap(void);   // Free heap bytes
+```
+
+### Log Macros
+
+```c
+SYS_LOGE("error: %s", msg);   // ESP_LOGE with "sys" tag
+SYS_LOGW("warning: %s", msg);
+SYS_LOGI("info: %s", msg);
+SYS_LOGD("debug: %s", msg);
+```
 
 ## Files
 
 ```
 system/
-├── README.md               # This file
+├── README.md
 ├── CMakeLists.txt
-├── include/
-│   ├── sys_log.h
-│   ├── sys_config.h
-│   ├── sys_time.h
-│   └── sys_task.h
-└── src/
-    ├── sys_log.c
-    ├── sys_config.c
-    ├── sys_time.c
-    └── sys_task.c
+├── system.h        # Public API and log macros
+└── system.c        # Implementation
 ```
 
 ## Dependencies
 
-- `esp_log`, `nvs_flash`, `esp_timer`, `freertos`
+- `esp_log`, `nvs_flash`, `esp_timer`, `esp_system`

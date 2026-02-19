@@ -25,7 +25,10 @@
 
 #define DISPLAY_WIDTH       800
 #define DISPLAY_HEIGHT      480
-#define DISPLAY_COLOR_DEPTH 16   // RGB565
+#define DISPLAY_COLOR_DEPTH 16      // RGB565
+#define DISPLAY_DATA_WIDTH  16      // RGB parallel data bus width (bits)
+#define DISPLAY_BITS_PER_PX 16      // Bits per pixel (RGB565 = 16)
+#define BOUNCE_BUFFER_LINES 10      // Bounce buffer height (must divide DISPLAY_HEIGHT evenly: 480/10=48)
 
 // ============================================================================
 // RGB Interface Pin Configuration
@@ -60,7 +63,8 @@
 #define PIN_PCLK        0   // GPIO_NUM_0
 
 // Backlight control
-#define PIN_BACKLIGHT   2   // GPIO_NUM_2
+#define PIN_BACKLIGHT       2   // GPIO_NUM_2
+#define PIN_PANEL_ENABLE    -1  // Not present on 7" panel (no separate enable pin)
 
 // ============================================================================
 // Display Timing Parameters

@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "WebFetch(domain:docs.espressif.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:forum.lvgl.io)",
+      "WebFetch(domain:components.espressif.com)",
+      "WebFetch(domain:docs.lvgl.io)"
     ]
   }
 }

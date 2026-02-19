@@ -169,7 +169,12 @@ esp_err_t can_driver_send(const can_frame_t *frame, uint32_t timeout_ms)
     if (!s_can_driver.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
+
+    SYS_LOGD(TAG, "CAN TX [0x%03lX] DLC=%d: %02X %02X %02X %02X %02X %02X %02X %02X",
+             (unsigned long)frame->id, frame->dlc,
+             frame->data[0], frame->data[1], frame->data[2], frame->data[3],
+             frame->data[4], frame->data[5], frame->data[6], frame->data[7]);
+
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_send(frame, timeout_ms);
@@ -309,6 +314,11 @@ esp_err_t can_driver_unregister_rx_callback(can_rx_callback_t callback)
 
 void can_driver_dispatch_rx_callbacks(const can_frame_t *frame)
 {
+    SYS_LOGD(TAG, "CAN RX [0x%03lX] DLC=%d: %02X %02X %02X %02X %02X %02X %02X %02X",
+             (unsigned long)frame->id, frame->dlc,
+             frame->data[0], frame->data[1], frame->data[2], frame->data[3],
+             frame->data[4], frame->data[5], frame->data[6], frame->data[7]);
+
     for (int i = 0; i < s_can_driver.rx_callback_count; i++) {
         if (s_can_driver.rx_callbacks[i]) {
             s_can_driver.rx_callbacks[i](frame);

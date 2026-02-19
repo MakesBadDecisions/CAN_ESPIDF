@@ -15,6 +15,18 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # --- PSRAM (Quad for N4R2) ---
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Move instructions + rodata to PSRAM to free flash SPI bus for PSRAM DMA
+# (reduces flash/PSRAM bus contention during LCD bounce buffer refills)
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+
+# --- Data Cache (64B required for LCD bounce buffer mode) ---
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# --- LCD RGB Panel ---
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
 
 # --- SPI (for SD Card) ---
 CONFIG_SPI_MASTER_IN_IRAM=y

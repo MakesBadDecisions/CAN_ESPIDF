@@ -76,7 +76,12 @@ CAN_ESPIDF is a two-node automotive CAN bus gauge and data logging system built 
     │  ┌────────────┴────────────────┐    │
     │  │ Display Driver (HAL)        │    │
     │  │  - RGB parallel LCD         │    │
-    │  │  - Touch input              │    │
+    │  │  - Double FB + VSYNC sync   │    │
+    │  └─────────────────────────────┘    │
+    │  ┌─────────────────────────────┐    │
+    │  │ Touch Driver                │    │
+    │  │  - XPT2046 SPI (Core 0)    │    │
+    │  │  - 4-corner calibration     │    │
     │  └─────────────────────────────┘    │
     │  ┌─────────────────────────────┐    │
     │  │ Data Logger                 │    │
@@ -134,12 +139,14 @@ CAN_ESPIDF/
 │   │   └── main.c
 │   └── components/
 │       ├── comm_link/              # UART RX/TX from CAN node
-│       ├── display_driver/         # Display HAL (RGB parallel LCD)
-│       │   └── devices/            # Elecrow CrowPanel panel drivers
+│       ├── devices/                # Per-panel pin definitions (DIS06043H, DIS07050, DIS08070H)
+│       ├── display_driver/         # RGB parallel LCD + LVGL (double FB, anti-tearing)
+│       ├── touch_driver/           # XPT2046 SPI touch (Core 0, calibration, NVS)
+│       ├── ui/                     # SquareLine Studio generated LVGL screens
 │       ├── gauge_engine/           # Gauge rendering + layouts
 │       ├── data_logger/            # SD card CSV logging
-│       ├── wifi_ap/                # WiFi AP for config + log download
-│       └── system/                 # Logging, NVS config, timing
+│       ├── wifi_manager/           # WiFi AP for config + log download
+│       └── system/                 # Logging, NVS, timing
 │
 └── shared/                         # Shared definitions (both nodes)
     ├── README.md
@@ -163,11 +170,11 @@ CAN_ESPIDF/
 ### Display Node (Elecrow CrowPanel)
 | Component | Purpose | Notes |
 |-----------|---------|-------|
-| Elecrow CrowPanel 5" (DIS07050) | Self-contained ESP32-S3 + display | 800x480 RGB parallel LCD, capacitive touch |
-| Elecrow CrowPanel 7" (DIS08070H) | Alternate larger panel | 800x480 RGB parallel LCD, capacitive touch |
-| Built-in SD card slot | Data logging | SDMMC interface |
+| Elecrow CrowPanel 4.3" (DIS06043H) | **Primary target** - ESP32-S3-N4R2 | 480x272 RGB LCD, XPT2046 resistive touch (SPI), UART1 on HY2.0-4P |
+| Elecrow CrowPanel 5" (DIS07050) | Alternate larger panel | 800x480 RGB LCD, GT911 capacitive touch (I2C) |
+| Elecrow CrowPanel 7" (DIS08070H) | Alternate larger panel | 800x480 RGB LCD, GT911 capacitive touch (I2C) |
+| Built-in SD card slot | Data logging | SPI interface (shared bus with touch on 4.3") |
 | Built-in I2S audio | Alert tones | On-board speaker/amp |
-| Built-in touch screen | User interaction | Capacitive touch controller |
 
 ### Inter-Node Communication
 | Method | Purpose | Notes |
@@ -237,20 +244,24 @@ The UART link runs at 2Mbps with DMA on both ends. Messages are framed with a sy
 
 ## Build & Flash
 
-Each node is a separate ESP-IDF project. Build and flash independently:
+Each node is a separate PlatformIO project using the ESP-IDF framework. Build and flash independently:
 
 ```bash
 # CAN Interface Node
 cd CAN_Interface
-idf.py set-target esp32s3
-idf.py build
-idf.py -p COMX flash monitor
+pio run -e can_interface
+pio run -e can_interface -t upload && pio device monitor
 
-# Display Node (Elecrow CrowPanel)
+# Display Node (Elecrow CrowPanel 4.3")
 cd CAN_Display
-idf.py set-target esp32s3
-idf.py build
-idf.py -p COMY flash monitor
+pio run -e display_node
+pio run -e display_node -t upload && pio device monitor
+```
+
+Full clean build (required after changing `sdkconfig.defaults`):
+
+```bash
+pio run -e display_node -t fullclean && pio run -e display_node
 ```
 
 ## Migrated From

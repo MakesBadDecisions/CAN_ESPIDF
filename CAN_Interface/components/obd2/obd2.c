@@ -284,9 +284,15 @@ void obd2_process_frame(uint32_t id, const uint8_t *data, uint8_t len)
     if (!is_obd2_response_id(id)) {
         return;
     }
-    
+
+    SYS_LOGD(TAG, "OBD2 frame [0x%03lX] len=%d: %02X %02X %02X %02X %02X %02X %02X %02X",
+             (unsigned long)id, len,
+             data[0], data[1], data[2], data[3],
+             data[4], data[5], data[6], data[7]);
+
     if (!s_obd2.waiting) {
-        return;  // Not waiting for a response
+        SYS_LOGW(TAG, "Unsolicited OBD2 frame from [0x%03lX] - not waiting", (unsigned long)id);
+        return;
     }
     
     // Check if this is from expected ECU (or any if broadcast)
@@ -396,14 +402,16 @@ retry:
     // Send request
     err = can_driver_send(&frame, 100);
     if (err != ESP_OK) {
-        SYS_LOGE(TAG, "CAN send failed");
+        SYS_LOGE(TAG, "CAN send failed: %s", esp_err_to_name(err));
         s_obd2.waiting = false;
         response->status = OBD2_STATUS_CAN_ERROR;
         return err;
     }
-    
-    SYS_LOGD(TAG, "Sent Mode 0x%02X PID 0x%04X to 0x%03lX",
-             request->mode, request->pid, request->tx_id);
+
+    SYS_LOGI(TAG, "OBD2 TX [0x%03lX] Mode=0x%02X PID=0x%04X | %02X %02X %02X %02X %02X %02X %02X %02X",
+             (unsigned long)request->tx_id, request->mode, request->pid,
+             frame.data[0], frame.data[1], frame.data[2], frame.data[3],
+             frame.data[4], frame.data[5], frame.data[6], frame.data[7]);
     
     // Wait for response
     BaseType_t got_response = xSemaphoreTake(s_obd2.response_sem, 
@@ -431,9 +439,13 @@ retry:
         goto retry;
     }
     
-    SYS_LOGD(TAG, "Response: Mode 0x%02X PID 0x%04X, %d bytes from 0x%03lX",
-             response->mode, response->pid, response->data_len, response->ecu_id);
-    
+    SYS_LOGI(TAG, "OBD2 RX [0x%03lX] Mode=0x%02X PID=0x%04X len=%d | %02X %02X %02X %02X",
+             (unsigned long)response->ecu_id, response->mode, response->pid, response->data_len,
+             response->data_len > 0 ? response->data[0] : 0xFF,
+             response->data_len > 1 ? response->data[1] : 0xFF,
+             response->data_len > 2 ? response->data[2] : 0xFF,
+             response->data_len > 3 ? response->data[3] : 0xFF);
+
     return ESP_OK;
 }
 
