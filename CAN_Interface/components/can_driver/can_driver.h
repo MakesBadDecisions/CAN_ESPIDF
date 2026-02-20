@@ -60,6 +60,8 @@ typedef enum {
 typedef enum {
     CAN_CRYSTAL_8MHZ  = 8000000,
     CAN_CRYSTAL_16MHZ = 16000000,
+    CAN_CRYSTAL_20MHZ = 20000000,
+    CAN_CRYSTAL_40MHZ = 40000000,
 } can_crystal_t;
 
 // ============================================================================
@@ -118,6 +120,7 @@ typedef struct {
 
 /**
  * @brief Default configuration for MCP2515 @ 500kbps
+ * Change to CAN_BACKEND_MCP2518FD + CAN_CRYSTAL_40MHZ when hardware is swapped
  */
 #define CAN_CONFIG_DEFAULT() { \
     .backend = CAN_BACKEND_MCP2515, \

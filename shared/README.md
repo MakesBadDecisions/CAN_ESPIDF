@@ -49,9 +49,13 @@ No copy step is needed. Both nodes reference the same physical files.
 ### pid_types
 
 Data type definitions for OBD-II Parameter IDs (PIDs). Includes enums for
-formula types, measurement units, PID categories, and the `PIDValue` struct
-that is the canonical representation of a decoded PID reading. Both nodes must
-interpret PID data identically, so these types live here.
+formula types, measurement units (`pid_unit_t` with 22 unit values), PID
+categories, and the `pid_value_t` struct that is the canonical representation
+of a decoded PID reading. Also provides a shared unit conversion API:
+`pid_unit_str()` for display strings, `pid_unit_convert()` for bidirectional
+conversions (°C↔°F, km/h↔mph, kPa↔PSI, Pa↔kPa), and `pid_unit_get_alts()`
+for discovering convertible alternatives. Both nodes link against this
+component so they always agree on layouts, enum values, and conversions.
 
 See [`pid_types/README.md`](pid_types/README.md).
 

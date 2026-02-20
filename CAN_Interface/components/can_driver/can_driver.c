@@ -8,6 +8,7 @@
 
 #include "can_driver.h"
 #include "mcp2515.h"
+#include "mcp2518fd.h"
 #include "system.h"
 #include "ESP32-S3-N16R8-DevKitC.h"
 #include <string.h>
@@ -82,9 +83,31 @@ esp_err_t can_driver_init_with_config(const can_config_t *config)
             break;
         }
         
-        case CAN_BACKEND_MCP2518FD:
-            SYS_LOGE(TAG, "MCP2518FD backend not implemented (Phase 7)");
-            return ESP_ERR_NOT_SUPPORTED;
+        case CAN_BACKEND_MCP2518FD: {
+            SYS_LOGI(TAG, "Initializing MCP2518FD backend");
+            
+            mcp2518fd_config_t fd_config = {
+                .spi_host = SPI2_HOST,
+                .pin_mosi = PIN_SPI2_MOSI,
+                .pin_miso = PIN_SPI2_MISO,
+                .pin_sck = PIN_SPI2_SCK,
+                .pin_cs = PIN_CAN_FD_CH0_CS,
+                .pin_int = PIN_CAN_FD_CH0_INT,
+                .spi_clock_hz = CAN_FD_SPI_CLOCK_HZ,
+                .crystal_freq = config->crystal,
+                .can_bitrate = config->bitrate,
+                .rx_queue_len = config->rx_queue_len,
+                .loopback = config->loopback,
+                .listen_only = config->listen_only,
+            };
+            
+            ret = mcp2518fd_init(&fd_config);
+            if (ret != ESP_OK) {
+                SYS_LOGE(TAG, "MCP2518FD init failed: %s", esp_err_to_name(ret));
+                return ret;
+            }
+            break;
+        }
         
         case CAN_BACKEND_TWAI:
             SYS_LOGE(TAG, "TWAI backend not implemented");
@@ -120,6 +143,9 @@ esp_err_t can_driver_deinit(void)
         case CAN_BACKEND_MCP2515:
             ret = mcp2515_deinit();
             break;
+        case CAN_BACKEND_MCP2518FD:
+            ret = mcp2518fd_deinit();
+            break;
         default:
             break;
     }
@@ -141,6 +167,8 @@ esp_err_t can_driver_start(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_start();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_start();
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -155,6 +183,8 @@ esp_err_t can_driver_stop(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_stop();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_stop();
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -178,6 +208,8 @@ esp_err_t can_driver_send(const can_frame_t *frame, uint32_t timeout_ms)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_send(frame, timeout_ms);
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_send(frame, timeout_ms);
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -192,6 +224,8 @@ esp_err_t can_driver_receive(can_frame_t *frame, uint32_t timeout_ms)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_receive(frame, timeout_ms);
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_receive(frame, timeout_ms);
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -206,6 +240,8 @@ uint32_t can_driver_get_rx_queue_count(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_get_rx_queue_count();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_get_rx_queue_count();
         default:
             return 0;
     }
@@ -229,6 +265,11 @@ esp_err_t can_driver_get_status(can_status_t *status)
             mcp2515_get_stats(&status->stats);
             status->bus_active = (status->stats.rx_frames > 0 || status->stats.tx_frames > 0);
             return ESP_OK;
+        case CAN_BACKEND_MCP2518FD:
+            status->state = mcp2518fd_get_state();
+            mcp2518fd_get_stats(&status->stats);
+            status->bus_active = (status->stats.rx_frames > 0 || status->stats.tx_frames > 0);
+            return ESP_OK;
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -243,6 +284,8 @@ esp_err_t can_driver_abort_tx(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_abort_all_tx();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_abort_all_tx();
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -257,6 +300,8 @@ esp_err_t can_driver_clear_errors(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_clear_errors();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_clear_errors();
         default:
             return ESP_ERR_NOT_SUPPORTED;
     }
@@ -271,6 +316,8 @@ QueueHandle_t can_driver_get_rx_queue(void)
     switch (s_can_driver.backend) {
         case CAN_BACKEND_MCP2515:
             return mcp2515_get_rx_queue();
+        case CAN_BACKEND_MCP2518FD:
+            return mcp2518fd_get_rx_queue();
         default:
             return NULL;
     }

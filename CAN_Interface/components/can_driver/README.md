@@ -4,9 +4,9 @@
 
 Provides a unified interface for sending and receiving CAN frames regardless of the underlying hardware. The CAN interface node supports multiple CAN backends simultaneously:
 
-- **MCP2515** - Phase 1 primary CAN backend. Standalone SPI-based CAN 2.0B controller, proven reliable from the Arduino project. Single channel on SPI2 (CS=GPIO 10, INT=GPIO 9). Gets the full OBD-II stack working before adding hardware complexity.
-- **TWAI** - ESP32-S3 native CAN peripheral. Added in Phase 2 to validate the HAL abstraction with a second backend. Also reserved for 1-Wire GM legacy single-wire network interface via adapter circuit.
-- **MCP2518FD** - Phase 7 CAN-FD backend. Two channels via Waveshare 2-CH CAN FD HAT over SPI2. Supports CAN 2.0B and CAN-FD (up to 8Mbps data phase). Provides galvanic isolation, TVS surge protection, and switchable 120-ohm termination. Drops in behind the same HAL built in Phase 1 (similar SPI command set to MCP2515).
+- **MCP2515** - Phase 1 CAN backend. Standalone SPI-based CAN 2.0B controller, proven reliable from the Arduino project. Single channel on SPI2 (CS=GPIO 10, INT=GPIO 9). Vehicle-tested (Ford F-150, 500kbps, 49 PIDs verified).
+- **MCP2518FD** - **Current primary backend.** Drop-in replacement for MCP2515 on the same SPI2 bus and CS/INT pins. Runs in CAN 2.0 classic mode for OBD-II compatibility. FIFO-based TX/RX architecture, interrupt-driven, 20MHz SPI clock, 40MHz crystal. Full implementation complete — pending vehicle validation.
+- **TWAI** - ESP32-S3 native CAN peripheral. Reserved for 1-Wire GM legacy single-wire network interface via adapter circuit.
 
 ## Architecture
 
@@ -86,9 +86,9 @@ typedef struct {
 } can_bus_status_t;
 ```
 
-## MCP2515 Backend Details (Phase 1 Primary)
+## MCP2515 Backend Details (Phase 1, Retained)
 
-Standalone MCP2515 SPI CAN controller. Proven from the Arduino project where it was the primary CAN interface. Uses the same SPI2 bus and pin assignments that the MCP2518FD will later use, enabling a seamless hardware swap.
+Standalone MCP2515 SPI CAN controller. Proven from the Arduino project. Superseded by MCP2518FD as primary backend but retained for reference and fallback.
 
 - **Interface:** SPI2 (FSPI) at 8-10 MHz
 - **Crystal:** 8 MHz or 16 MHz (must match config)
@@ -99,19 +99,51 @@ Standalone MCP2515 SPI CAN controller. Proven from the Arduino project where it 
 - **Interrupt:** Active-low INT pin for RX ready / error / TX complete
 - **Pins:** CS=GPIO 10, INT=GPIO 9 (same pins as MCP2518FD CH0 for easy swap)
 
-## MCP2518FD Backend Details (Phase 7)
+## MCP2518FD Backend Details (Current Primary)
 
-Waveshare 2-CH CAN FD HAT with two MCP2518FD controllers on a shared SPI2 bus. Drop-in replacement behind the same HAL -- similar SPI register access pattern to MCP2515.
+Waveshare 2-CH CAN FD HAT with MCP2518FD controller on SPI2 bus. Drop-in replacement for MCP2515 — same CS=GPIO10, INT=GPIO9 pins, same HAL API.
 
-- **Interface:** SPI2 (FSPI) at up to 20MHz
-- **Channels:** 2 independent CAN-FD channels with separate CS and INT lines
-- **CAN 2.0B:** Standard/extended frames at 125kbps - 1Mbps
-- **CAN-FD:** Up to 8Mbps data phase, 64-byte payload
-- **Filters:** Configurable hardware acceptance filters per channel
+**Architecture:**
+- FIFO-based TX/RX in 2KB device RAM (not fixed buffers like MCP2515)
+- FIFO1 = TX (8 message deep, 8-byte payload, unlimited retransmit)
+- FIFO2 = RX (16 message deep, 8-byte payload, overflow + not-empty interrupts)
+- Filter 0 accepts all frames → routes to FIFO2
+- No TEF (Transmit Event FIFO) — unnecessary for OBD-II polling
+- ISR task pattern: GPIO falling edge → vTaskNotifyGive → drain RX FIFO → FreeRTOS queue
+
+**SPI Protocol:**
+- 16-bit big-endian command word: instruction (4 bits) | 12-bit register address
+- Register data is little-endian on the wire (4-byte word-aligned)
+- Instructions: RESET=0x0000, WRITE=0x2000|addr, READ=0x3000|addr
+- SPI2 (FSPI) at 20MHz, Mode 0,0
+
+**Specifications:**
+- **Interface:** SPI2 (FSPI) at 20 MHz
+- **Crystal:** 40 MHz (configurable, 20 MHz also supported)
+- **CAN Mode:** Classic CAN 2.0 (REQOP mode 6) for OBD-II; CAN-FD capable for future use
+- **Bitrates:** 125kbps, 250kbps, 500kbps pre-computed (~80% sample point)
+- **Channels:** 2 independent channels with separate CS/INT (CH0: CS=10/INT=9, CH1: CS=46/INT=3)
 - **Isolation:** Galvanic isolation on both channels (capacitive coupling)
 - **Protection:** TVS diodes for surge/ESD protection
 - **Termination:** 120-ohm termination resistor with solder jumper (per channel)
-- **Interrupt:** Active-low INT pin per channel for RX ready / error
+
+**Implementation Files:**
+- `mcp2518fd_defs.h` — Complete register map (CiCON, CiNBTCFG, CiINT, FIFO, filter, OSC, message objects)
+- `mcp2518fd.h` — Config struct and API declarations
+- `mcp2518fd.c` — Full driver (~600 lines): SPI primitives, mode control, bitrate config, FIFO/filter setup, TX/RX frame packing, ISR task, init/deinit with error cleanup chain
+
+## MCP2515 Backend Details (Phase 1, Retained)
+
+Standalone MCP2515 SPI CAN controller. Proven from the Arduino project. Superseded by MCP2518FD as primary backend but retained for reference and fallback.
+
+- **Interface:** SPI2 (FSPI) at 8-10 MHz
+- **Crystal:** 8 MHz or 16 MHz (must match config)
+- **CAN 2.0B:** Standard/extended frames at 5kbps - 1Mbps
+- **Filters:** 2 masks, 6 filters (hardware acceptance filtering)
+- **TX Buffers:** 3 transmit buffers with priority
+- **RX Buffers:** 2 receive buffers with rollover
+- **Interrupt:** Active-low INT pin for RX ready / error / TX complete
+- **Pins:** CS=GPIO 10, INT=GPIO 9 (same pins as MCP2518FD CH0)
 
 ## TWAI Backend Details (Phase 2 / 1-Wire GM Legacy)
 
@@ -127,31 +159,24 @@ ESP32-S3's built-in CAN controller. Reserved for 1-Wire GM legacy single-wire ne
 Pin assignments are defined in `components/devices/ESP32-S3-N16R8-DevKitC.h`. Backend selection via menuconfig (Kconfig) or compile-time defines:
 
 ```
-# MCP2515 (Phase 1 Primary)
-CONFIG_CAN_MCP2515_ENABLED=y
-CONFIG_CAN_MCP2515_SPI_HOST=SPI2_HOST
-CONFIG_CAN_MCP2515_SPI_CLOCK_HZ=10000000
-CONFIG_CAN_MCP2515_MOSI_GPIO=11
-CONFIG_CAN_MCP2515_MISO_GPIO=13
-CONFIG_CAN_MCP2515_SCK_GPIO=12
-CONFIG_CAN_MCP2515_CS_GPIO=10
-CONFIG_CAN_MCP2515_INT_GPIO=9
-CONFIG_CAN_MCP2515_CRYSTAL_HZ=8000000
+# MCP2518FD (Current Primary -- Waveshare 2-CH CAN FD HAT)
+CONFIG_CAN_MCP2518FD_ENABLED=y
+CONFIG_CAN_MCP2518FD_SPI_HOST=SPI2_HOST
+CONFIG_CAN_MCP2518FD_SPI_CLOCK_HZ=20000000
+CONFIG_CAN_MCP2518FD_CRYSTAL_HZ=40000000
+CONFIG_CAN_MCP2518FD_CH0_CS_GPIO=10
+CONFIG_CAN_MCP2518FD_CH0_INT_GPIO=9
+CONFIG_CAN_MCP2518FD_CH1_CS_GPIO=46
+CONFIG_CAN_MCP2518FD_CH1_INT_GPIO=3
+
+# MCP2515 (Phase 1 -- retained as fallback)
+CONFIG_CAN_MCP2515_ENABLED=n
 
 # TWAI (Phase 2 - HAL validation + 1-Wire GM legacy)
 CONFIG_CAN_TWAI_ENABLED=n
 CONFIG_CAN_TWAI_TX_GPIO=4
 CONFIG_CAN_TWAI_RX_GPIO=5
 CONFIG_CAN_TWAI_BAUD=33300
-
-# MCP2518FD (Phase 7 - Waveshare 2-CH CAN FD HAT)
-CONFIG_CAN_MCP2518FD_ENABLED=n
-CONFIG_CAN_MCP2518FD_SPI_HOST=SPI2_HOST
-CONFIG_CAN_MCP2518FD_SPI_CLOCK_HZ=20000000
-CONFIG_CAN_MCP2518FD_CH0_CS_GPIO=10
-CONFIG_CAN_MCP2518FD_CH0_INT_GPIO=9
-CONFIG_CAN_MCP2518FD_CH1_CS_GPIO=46
-CONFIG_CAN_MCP2518FD_CH1_INT_GPIO=3
 ```
 
 ## Files
@@ -160,16 +185,14 @@ CONFIG_CAN_MCP2518FD_CH1_INT_GPIO=3
 can_driver/
 ├── README.md               # This file
 ├── CMakeLists.txt           # Component build config
-├── Kconfig                  # Menuconfig options
-├── include/
-│   ├── can_driver.h         # Public API
-│   ├── can_types.h          # Frame types, enums, status
-│   └── can_backend.h        # Backend interface definition
-└── src/
-    ├── can_driver.c          # Driver manager (registration, dispatch)
-    ├── mcp2515_backend.c     # MCP2515 SPI implementation (Phase 1 primary)
-    ├── twai_backend.c        # TWAI implementation (Phase 2 / 1-Wire GM)
-    └── mcp2518fd_backend.c   # MCP2518FD SPI implementation (Phase 7 CAN-FD)
+├── can_driver.c             # HAL dispatch layer (backend selection, config mapping)
+├── can_driver.h             # Public API, can_config_t, can_frame_t
+├── mcp2515.c                # MCP2515 SPI backend (Phase 1, retained)
+├── mcp2515.h                # MCP2515 config and API
+├── mcp2515_defs.h           # MCP2515 register map
+├── mcp2518fd.c              # MCP2518FD SPI backend (current primary)
+├── mcp2518fd.h              # MCP2518FD config and API
+└── mcp2518fd_defs.h         # MCP2518FD register map, FIFO defs, bit timing tables
 ```
 
 ## Dependencies

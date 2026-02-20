@@ -11,6 +11,7 @@
 
 #include "esp_err.h"
 #include "comm_protocol.h"
+#include "pid_types.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -35,7 +36,7 @@ typedef enum {
 } comm_link_state_t;
 
 // ============================================================================
-// Cached PID Value
+// Cached PID Value (Display-local cache entry, not the shared wire type)
 // ============================================================================
 
 typedef struct {
@@ -44,7 +45,7 @@ typedef struct {
     uint8_t     unit;           // Unit enum
     uint32_t    timestamp;      // When received (local tick)
     bool        valid;          // Entry in use
-} pid_value_t;
+} pid_cache_entry_t;
 
 // ============================================================================
 // PID Metadata (RAM cache from scan, not persisted to flash)
@@ -117,7 +118,7 @@ const comm_link_stats_t* comm_link_get_stats(void);
  * @param out_value Output value struct
  * @return true if found and valid
  */
-bool comm_link_get_pid(uint16_t pid_id, pid_value_t *out_value);
+bool comm_link_get_pid(uint16_t pid_id, pid_cache_entry_t *out_value);
 
 /**
  * @brief Get all cached PID values
@@ -125,7 +126,7 @@ bool comm_link_get_pid(uint16_t pid_id, pid_value_t *out_value);
  * @param max_count Maximum entries to return
  * @return Number of valid entries
  */
-int comm_link_get_all_pids(pid_value_t *out_values, int max_count);
+int comm_link_get_all_pids(pid_cache_entry_t *out_values, int max_count);
 
 /**
  * @brief Register callback for real-time PID updates

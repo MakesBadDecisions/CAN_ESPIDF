@@ -1,102 +1,101 @@
-# gauge_engine - Gauge Rendering & Layout
+# gauge_engine - Gauge Data Manager
 
 ## Purpose
 
-Renders automotive gauges on the display using data from the PID value store. Supports multiple gauge types, configurable layouts, and alert/warning thresholds.
+Owns per-gauge state (PID assignment, unit selection, live converted values) and aggregates active gauges into a single deduplicated poll list sent to the CAN Interface Node. This component has **no LVGL dependency** -- the UI layer (`ui_events.c`) reads formatted value strings from here and pushes them to widgets.
 
-## Gauge Types
+Designed to support up to **20 simultaneous gauge slots** across multiple screens.
 
-| Type | Description | Best For |
-|------|-------------|----------|
-| **Numeric** | Large number with label and units | RPM, speed, temp |
-| **Bar** | Horizontal or vertical fill bar | Throttle, fuel level, load |
-| **Sweep** | Arc/dial gauge with needle | RPM tach, speedometer, boost |
-| **Min/Max** | Number with min/max history | Knock retard, fuel trim |
-| **Status** | On/off or enum text | MIL, DFCO, PE active |
-| **Graph** | Scrolling time-series line | Trend monitoring |
+## Architecture
 
-## Layout System
+```
+┌──────────────────────────────────────────────────────┐
+│  UI Layer (ui_events.c)                              │
+│  - Table-driven: gauge_widget_t[] maps slots→widgets │
+│  - on_pid_changed / on_unit_changed callbacks        │
+│  - LVGL timer reads value_str, pushes to labels      │
+└────────────────┬─────────────────────────────────────┘
+                 │  gauge_engine API
+┌────────────────▼─────────────────────────────────────┐
+│  gauge_engine (this component)                       │
+│  - s_slots[GAUGE_MAX_SLOTS] (mutex-protected)        │
+│  - PID assignment via comm_link metadata index       │
+│  - Unit conversion via pid_types                     │
+│  - Poll list aggregation with PID deduplication      │
+│  - Formatted value_str output per slot               │
+└────────────────┬─────────────────────────────────────┘
+                 │  comm_link / pid_types APIs
+┌────────────────▼─────────────────────────────────────┐
+│  comm_link          │  shared/pid_types              │
+│  - PID data store   │  - pid_unit_convert()          │
+│  - PID metadata     │  - pid_unit_get_alts()         │
+│  - set_poll_list()  │  - pid_unit_to_str()           │
+└─────────────────────┴────────────────────────────────┘
+```
 
-Gauges are arranged in configurable layouts. Each layout defines a grid of gauge slots:
+## Gauge Slot
+
+Each slot holds PID assignment, unit selection, and live data:
 
 ```c
 typedef struct {
-    uint8_t     row;
-    uint8_t     col;
-    uint8_t     row_span;   // 1 = single cell, 2 = double height
-    uint8_t     col_span;   // 1 = single cell, 2 = double width
-    gauge_type_t type;
-    uint16_t    pid;        // Which PID to display
-    unit_t      display_unit; // Desired display unit (may differ from native)
-    float       min_value;  // Scale minimum
-    float       max_value;  // Scale maximum
-    float       warn_low;   // Yellow warning below this
-    float       warn_high;  // Yellow warning above this
-    float       crit_low;   // Red critical below this
-    float       crit_high;  // Red critical above this
+    uint16_t    pid_id;                         // Selected PID (0xFFFF = none)
+    pid_unit_t  base_unit;                      // PID's native unit
+    pid_unit_t  display_unit;                   // Currently selected display unit
+    float       raw_value;                      // Last value in base units
+    float       display_value;                  // Converted to display_unit
+    char        value_str[GAUGE_VALUE_STR_LEN]; // Formatted string "123.4"
+    bool        value_valid;                    // Got at least one reading
+    uint32_t    last_update_tick;               // Tick of last update
 } gauge_slot_t;
-
-typedef struct {
-    const char   *name;         // "Street", "Track", "Diagnostics"
-    uint8_t       rows;
-    uint8_t       cols;
-    gauge_slot_t *slots;
-    uint8_t       slot_count;
-} gauge_layout_t;
 ```
 
-Multiple layouts can be stored and switched at runtime (e.g., "Street" with 4 gauges, "Track" with 8 gauges, "Diag" with all values).
+## API Summary
 
-## Alert System
+| Function | Purpose |
+|----------|---------|
+| `gauge_engine_init()` | Zero all slots, create mutex |
+| `gauge_engine_set_pid(slot, pid_index)` | Assign PID from comm_link metadata index |
+| `gauge_engine_set_unit(slot, unit_index)` | Change display unit (0 = base, 1+ = alternates) |
+| `gauge_engine_clear_slot(slot)` | Un-assign a gauge slot |
+| `gauge_engine_get_slot(slot)` | Read-only pointer to slot state |
+| `gauge_engine_get_unit_options(slot, buf, len)` | Build unit dropdown string for slot's PID |
+| `gauge_engine_build_pid_options(buf, len)` | Build PID dropdown string from scan metadata |
+| `gauge_engine_start_polling(rate_hz)` | Aggregate assigned PIDs, send poll list |
+| `gauge_engine_stop_polling()` | Stop polling, clear poll list |
+| `gauge_engine_is_polling()` | Check poll state |
+| `gauge_engine_update()` | Read latest values, convert, format strings |
+| `gauge_engine_rebuild_poll_list()` | Re-aggregate after PID assignment change |
+| `gauge_engine_get_active_pid_count()` | Count unique PIDs in poll list |
 
-Each gauge slot can define warning and critical thresholds:
+## Thread Safety
 
-- **Normal:** Standard color rendering
-- **Warning:** Yellow/amber highlight, optional audible beep
-- **Critical:** Red flash, persistent alert until acknowledged
+All slot access is protected by a FreeRTOS mutex. The UI layer calls set/get functions from the LVGL task (Core 1), while `gauge_engine_update()` reads from `comm_link` which is updated by the UART RX task (Core 0).
 
-Alerts are evaluated every render cycle against the current PID value.
+## Adding More Gauges
 
-## Rendering Pipeline
-
-```
-1. Read PID values from pid_store (comm_link provides these)
-2. For each gauge slot in active layout:
-   a. Get current value for slot's PID
-   b. Convert to display unit if needed
-   c. Check alert thresholds
-   d. Render gauge to framebuffer (only if value changed)
-3. Render status bar (connection state, log status, alerts)
-4. Flush dirty regions to display hardware
-```
-
-## Configuration
-
-Gauge layouts are stored in NVS and configurable via WiFi web UI. Default layouts are compiled in for out-of-box use.
+1. **SquareLine Studio**: Add gauge container with `piddropdownN`, `unitdropdownN`, `gaugeTextN`.
+2. **ui_events.c**: Add an entry to `s_gauge_widgets[]` mapping the new slot index to the new widget pointers.
+3. No changes needed in `gauge_engine` -- slots are pre-allocated up to `GAUGE_MAX_SLOTS` (20).
 
 ## Files
 
 ```
 gauge_engine/
-├── README.md               # This file
-├── CMakeLists.txt
-├── include/
-│   ├── gauge_engine.h       # Public API: init, render_tick, set_layout
-│   ├── gauge_types.h        # Gauge type definitions, layout structs
-│   └── gauge_alerts.h       # Alert threshold checking
-└── src/
-    ├── gauge_engine.c        # Layout management, render coordinator
-    ├── gauge_numeric.c       # Numeric gauge renderer
-    ├── gauge_bar.c           # Bar gauge renderer
-    ├── gauge_sweep.c         # Sweep/dial gauge renderer
-    ├── gauge_status.c        # Status indicator renderer
-    ├── gauge_graph.c         # Time-series graph renderer
-    └── gauge_alerts.c        # Alert evaluation and visual effects
+├── README.md           # This file
+├── CMakeLists.txt      # REQUIRES: comm_link pid_types
+├── gauge_engine.h      # Public API and gauge_slot_t struct
+└── gauge_engine.c      # Implementation (~280 lines)
 ```
 
 ## Dependencies
 
-- `display_driver` (framebuffer drawing primitives)
-- `comm_link/pid_store` (current PID values)
-- `shared/pid_types` (unit conversions for display)
-- `system` (logging, NVS for layout storage)
+- `comm_link` (PID data store, metadata, poll list control)
+- `shared/pid_types` (unit conversion, unit string formatting)
+
+## Future
+
+- [ ] NVS persistence -- save/load per-slot PID and unit assignments
+- [ ] Alert thresholds -- warning/critical limits with color changes
+- [ ] Value smoothing -- low-pass filter for jittery readings
+- [ ] Gauge type rendering -- sweep dials, bar graphs (currently numeric only)

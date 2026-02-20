@@ -4,11 +4,11 @@
 
 The CAN Interface Node is one of two nodes in the CAN_ESPIDF system. It runs on an ESP32-S3-N16R8-DevKitC and serves as the vehicle-side bridge: it reads raw CAN frames from the OBD-II port, decodes them into engineering values, and transmits the results to the Display Node over UART (USB-C cable).
 
-Phase 1 uses an **MCP2515** SPI CAN controller (proven from the Arduino project). The **Waveshare 2-CH CAN FD HAT** (2x MCP2518FD) will be added as a drop-in backend in Phase 7 behind the same CAN driver HAL.
+Phase 1 used an **MCP2515** SPI CAN controller (proven on vehicle). The **MCP2518FD** is now the primary backend — full driver implementation complete, running in CAN 2.0 classic mode behind the same HAL API. Pending vehicle validation.
 
 ### Responsibilities
 
-- **CAN bus communication** -- Talk to the vehicle via MCP2515 (Phase 1, SPI) or Waveshare 2-CH CAN FD HAT (Phase 7, 2x MCP2518FD over SPI2). TWAI reserved for 1-Wire GM legacy networks.
+- **CAN bus communication** -- Talk to the vehicle via MCP2518FD (current primary, SPI2, CAN 2.0 classic mode) or MCP2515 (Phase 1 fallback). Waveshare 2-CH CAN FD HAT supports dual-channel CAN-FD for future expansion. TWAI reserved for 1-Wire GM legacy networks.
 - **OBD-II protocol** -- Build Mode 01/02 requests, parse single-frame and ISO-TP multi-frame responses, handle flow control.
 - **PID decode** -- Look up 165 PIDs (standard OBD-II 0x00--0xA4 plus GM extended 0x83F--0x4268) in a const table and apply formula-based decoding to produce engineering values with units.
 - **Smart polling** -- Schedule PID requests using priority tiers and adaptive intervals so high-value PIDs update fast while low-priority PIDs share remaining bandwidth.
@@ -20,7 +20,8 @@ Phase 1 uses an **MCP2515** SPI CAN controller (proven from the Arduino project)
 
 ### Future
 
-- Waveshare 2-CH CAN FD HAT (2x MCP2518FD) for CAN-FD support (Phase 7).
+- MCP2518FD Channel 1 for dual-bus operation (CS=GPIO46, INT=GPIO3).
+- CAN-FD mode with 64-byte payloads and flexible data rate (up to 8 Mbps data phase).
 - 1-Wire GM legacy network interface for older vehicles (TWAI backend).
 
 ---
@@ -32,7 +33,7 @@ All components live under `components/`. Each is a self-contained ESP-IDF compon
 | Component      | Directory        | Description                                                                                   |
 | -------------- | ---------------- | --------------------------------------------------------------------------------------------- |
 | Devices        | `devices/`       | Board-specific hardware pin definitions and capability flags. See `ESP32-S3-N16R8-DevKitC.h`. |
-| CAN Driver     | `can_driver/`    | Hardware abstraction layer. MCP2515 backend (Phase 1, SPI), MCP2518FD backend (Phase 7, 2 channels via SPI2), TWAI backend (1-Wire GM legacy). Unified API for open/close/send/receive regardless of backend. |
+| CAN Driver     | `can_driver/`    | Hardware abstraction layer. MCP2518FD backend (current primary, FIFO-based SPI, CAN 2.0 classic), MCP2515 backend (Phase 1 fallback), TWAI backend (1-Wire GM legacy). Unified API for open/close/send/receive regardless of backend. |
 | PID Database   | `pid_db/`        | Pure C `const` table of 165 PID entries. Each entry holds the PID number, name, formula coefficients, unit string, min/max, and byte length. Provides a lookup function and unit conversion helpers. |
 | OBD-II Stack   | `obd2/`          | OBD-II protocol implementation. Request builder (Mode + PID -> CAN frame), response parser, ISO-TP segmentation and reassembly, flow control frame generation. |
 | Diagnostics    | `diagnostics/`   | DTC manager (Mode 03 read, Mode 04 clear, Mode 07 pending). UDS processor (service 0x19 extended DTC, 0x22 DID read). Vehicle info: VIN (Mode 09 PID 02), calibration verification numbers, ECU identification. |
@@ -101,8 +102,8 @@ Initialization runs in `app_main()` on Core 0 before any application tasks are c
 
 2. can_driver_init()
    - Initialize SPI2 bus (MOSI=11, MISO=13, SCK=12)
-   - Phase 1: Configure MCP2515 (CS=10, INT=9) as primary
-   - Phase 7: Configure MCP2518FD CH0 (CS=10, INT=9) + CH1 (CS=46, INT=3)
+   - Configure MCP2518FD CH0 (CS=10, INT=9) as primary (CAN 2.0 classic @ 500kbps)
+   - (Future) Configure MCP2518FD CH1 (CS=46, INT=3) for dual-bus
    - (Optional) Initialize TWAI for 1-Wire GM legacy (TX=4, RX=5)
 
 3. pid_db_init()

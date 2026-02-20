@@ -194,15 +194,19 @@ uses them to populate the PID dropdown and label gauge readings.
 ```c
 typedef struct __attribute__((packed)) {
     uint16_t pid_id;                        // PID number
+    uint8_t  unit;                          // pid_unit_t enum (base unit)
     char     name[PID_META_NAME_LEN];       // Human-readable name (32 chars)
     char     unit_str[PID_META_UNIT_LEN];   // Unit display string (8 chars)
 } comm_pid_meta_t;
 ```
 
-**Size per entry:** 42 bytes. Up to 24 entries per frame (at 1024-byte max
+**Size per entry:** 43 bytes. Up to 23 entries per frame (at 1024-byte max
 payload). Multiple `PID_METADATA` frames are sent in sequence to cover all
 supported data PIDs. Only `FORMULA` and `ENUM` type PIDs are included;
 bitmap, status, and string PIDs are filtered out.
+
+The `unit` field carries the `pid_unit_t` enum value so the Display can
+offer unit conversion (e.g., °C ↔ °F) without needing to parse the string.
 
 **Scan flow:**
 1. Interface sends `SCAN_STATUS` IN_PROGRESS (Display clears metadata store)

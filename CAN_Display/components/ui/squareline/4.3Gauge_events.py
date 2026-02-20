@@ -6,3 +6,7 @@ def connectCAN(event_struct):
 def scanCAN(event_struct):
     return
 
+
+def pollCAN(event_struct):
+    return
+

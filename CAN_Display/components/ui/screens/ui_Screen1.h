@@ -19,12 +19,24 @@ extern lv_obj_t * ui_connectCAN;
 extern lv_obj_t * ui_Label1;
 extern lv_obj_t * ui_gauge1;
 extern lv_obj_t * ui_piddropdown1;
-extern lv_obj_t * ui_unnitdropdown2;
+extern lv_obj_t * ui_unitdropdown1;
 extern lv_obj_t * ui_gaugeText1;
 extern lv_obj_t * ui_vehicleInfoLabel1;
 extern void ui_event_pollCAN1(lv_event_t * e);
 extern lv_obj_t * ui_pollCAN1;
 extern lv_obj_t * ui_Label2;
+extern lv_obj_t * ui_gauge2;
+extern lv_obj_t * ui_piddropdown2;
+extern lv_obj_t * ui_unitdropdown2;
+extern lv_obj_t * ui_gaugeText2;
+extern lv_obj_t * ui_gauge3;
+extern lv_obj_t * ui_piddropdown3;
+extern lv_obj_t * ui_unitdropdown3;
+extern lv_obj_t * ui_gaugeText3;
+extern lv_obj_t * ui_gauge4;
+extern lv_obj_t * ui_piddropdown4;
+extern lv_obj_t * ui_unitdropdown4;
+extern lv_obj_t * ui_gaugeText4;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

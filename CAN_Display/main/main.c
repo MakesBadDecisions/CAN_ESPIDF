@@ -17,6 +17,7 @@
 #include "comm_link.h"
 #include "display_driver.h"
 #include "touch_driver.h"
+#include "gauge_engine.h"
 #include "lvgl.h"
 #include "ui.h"
 
@@ -80,10 +81,14 @@ void app_main(void)
         return;
     }
 
+    // Phase 6: Initialize gauge engine (per-gauge PID/unit state)
+    ret = gauge_engine_init();
+    if (ret != ESP_OK) {
+        SYS_LOGE("Gauge engine init failed: %s", esp_err_to_name(ret));
+    }
+
     SYS_LOGI("=== Display Node Ready ===");
     SYS_LOGI("Free heap: %lu bytes", (unsigned long)sys_get_free_heap());
-
-    // TODO: Initialize gauge_engine
     // TODO: Phase 5 - Initialize data_logger (SD card)
     // TODO: Phase 6 - Initialize wifi_manager (WiFi AP for config + log download)
 

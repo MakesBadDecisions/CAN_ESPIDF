@@ -130,6 +130,7 @@
 #define MCP2515_SPI_CLOCK_HZ   10000000    // 10 MHz max for MCP2515
 #define MCP2515_CRYSTAL_HZ     8000000     // 8 MHz crystal (verify on module)
 #define CAN_FD_SPI_CLOCK_HZ    20000000    // 20 MHz max for MCP2518FD
+#define MCP2518FD_CRYSTAL_HZ   40000000    // 40 MHz crystal (Waveshare HAT)
 
 // ============================================================================
 // UART1 Configuration Constants

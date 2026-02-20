@@ -1,8 +1,9 @@
-# gauge_engine - Gauge Rendering & Layout
-# Numeric, bar, sweep gauges with alerts
+# gauge_engine - Gauge Data Manager
+# Per-gauge PID assignment, unit conversion, poll list aggregation
+# No LVGL dependency -- UI reads formatted values from here
 
 idf_component_register(
     SRCS "gauge_engine.c"
     INCLUDE_DIRS "."
-    REQUIRES display_driver comm_link system
+    REQUIRES comm_link pid_types
 )

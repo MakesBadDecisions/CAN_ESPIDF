@@ -10,11 +10,23 @@ lv_obj_t * ui_connectCAN = NULL;
 lv_obj_t * ui_Label1 = NULL;
 lv_obj_t * ui_gauge1 = NULL;
 lv_obj_t * ui_piddropdown1 = NULL;
-lv_obj_t * ui_unnitdropdown2 = NULL;
+lv_obj_t * ui_unitdropdown1 = NULL;
 lv_obj_t * ui_gaugeText1 = NULL;
 lv_obj_t * ui_vehicleInfoLabel1 = NULL;
 lv_obj_t * ui_pollCAN1 = NULL;
 lv_obj_t * ui_Label2 = NULL;
+lv_obj_t * ui_gauge2 = NULL;
+lv_obj_t * ui_piddropdown2 = NULL;
+lv_obj_t * ui_unitdropdown2 = NULL;
+lv_obj_t * ui_gaugeText2 = NULL;
+lv_obj_t * ui_gauge3 = NULL;
+lv_obj_t * ui_piddropdown3 = NULL;
+lv_obj_t * ui_unitdropdown3 = NULL;
+lv_obj_t * ui_gaugeText3 = NULL;
+lv_obj_t * ui_gauge4 = NULL;
+lv_obj_t * ui_piddropdown4 = NULL;
+lv_obj_t * ui_unitdropdown4 = NULL;
+lv_obj_t * ui_gaugeText4 = NULL;
 // event funtions
 void ui_event_connectCAN(lv_event_t * e)
 {
@@ -45,10 +57,7 @@ void ui_Screen1_screen_init(void)
 
     ui_connectCAN = lv_btn_create(ui_Screen1);
     lv_obj_set_width(ui_connectCAN, lv_pct(20));
-    lv_obj_set_height(ui_connectCAN, lv_pct(15));
-    lv_obj_set_x(ui_connectCAN, lv_pct(-15));
-    lv_obj_set_y(ui_connectCAN, lv_pct(-10));
-    lv_obj_set_align(ui_connectCAN, LV_ALIGN_CENTER);
+    lv_obj_set_height(ui_connectCAN, lv_pct(10));
     lv_obj_add_flag(ui_connectCAN, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_connectCAN, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
 
@@ -59,24 +68,32 @@ void ui_Screen1_screen_init(void)
     lv_label_set_text(ui_Label1, "Connect");
 
     ui_gauge1 = lv_obj_create(ui_Screen1);
-    lv_obj_set_width(ui_gauge1, lv_pct(39));
-    lv_obj_set_height(ui_gauge1, lv_pct(55));
-    lv_obj_set_x(ui_gauge1, lv_pct(15));
-    lv_obj_set_y(ui_gauge1, lv_pct(0));
+    lv_obj_set_width(ui_gauge1, lv_pct(30));
+    lv_obj_set_height(ui_gauge1, lv_pct(40));
+    lv_obj_set_x(ui_gauge1, lv_pct(-15));
+    lv_obj_set_y(ui_gauge1, lv_pct(-20));
     lv_obj_set_align(ui_gauge1, LV_ALIGN_CENTER);
     lv_obj_clear_flag(ui_gauge1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
 
     ui_piddropdown1 = lv_dropdown_create(ui_gauge1);
-    lv_obj_set_width(ui_piddropdown1, 150);
+    lv_dropdown_set_options(ui_piddropdown1, "PID NAME ");
+    lv_obj_set_width(ui_piddropdown1, lv_pct(125));
     lv_obj_set_height(ui_piddropdown1, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_x(ui_piddropdown1, lv_pct(0));
+    lv_obj_set_y(ui_piddropdown1, lv_pct(-20));
     lv_obj_set_align(ui_piddropdown1, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_piddropdown1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_piddropdown1, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_unnitdropdown2 = lv_dropdown_create(ui_gauge1);
-    lv_obj_set_width(ui_unnitdropdown2, 150);
-    lv_obj_set_height(ui_unnitdropdown2, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_unnitdropdown2, LV_ALIGN_BOTTOM_MID);
-    lv_obj_add_flag(ui_unnitdropdown2, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    ui_unitdropdown1 = lv_dropdown_create(ui_gauge1);
+    lv_dropdown_set_options(ui_unitdropdown1, "PID UNIT");
+    lv_obj_set_width(ui_unitdropdown1, lv_pct(125));
+    lv_obj_set_height(ui_unitdropdown1, LV_SIZE_CONTENT);    /// 25
+    lv_obj_set_x(ui_unitdropdown1, lv_pct(0));
+    lv_obj_set_y(ui_unitdropdown1, lv_pct(20));
+    lv_obj_set_align(ui_unitdropdown1, LV_ALIGN_BOTTOM_MID);
+    lv_obj_add_flag(ui_unitdropdown1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_unitdropdown1, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_gaugeText1 = lv_label_create(ui_gauge1);
     lv_obj_set_width(ui_gaugeText1, LV_SIZE_CONTENT);   /// 1
@@ -88,16 +105,14 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_vehicleInfoLabel1, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_vehicleInfoLabel1, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_x(ui_vehicleInfoLabel1, lv_pct(0));
-    lv_obj_set_y(ui_vehicleInfoLabel1, lv_pct(5));
+    lv_obj_set_y(ui_vehicleInfoLabel1, lv_pct(2));
     lv_obj_set_align(ui_vehicleInfoLabel1, LV_ALIGN_TOP_MID);
     lv_label_set_text(ui_vehicleInfoLabel1, "Vehicle Info");
 
     ui_pollCAN1 = lv_btn_create(ui_Screen1);
     lv_obj_set_width(ui_pollCAN1, lv_pct(20));
-    lv_obj_set_height(ui_pollCAN1, lv_pct(15));
-    lv_obj_set_x(ui_pollCAN1, lv_pct(-15));
-    lv_obj_set_y(ui_pollCAN1, lv_pct(10));
-    lv_obj_set_align(ui_pollCAN1, LV_ALIGN_CENTER);
+    lv_obj_set_height(ui_pollCAN1, lv_pct(10));
+    lv_obj_set_align(ui_pollCAN1, LV_ALIGN_TOP_RIGHT);
     lv_obj_add_flag(ui_pollCAN1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_pollCAN1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
 
@@ -106,6 +121,108 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_height(ui_Label2, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_Label2, LV_ALIGN_CENTER);
     lv_label_set_text(ui_Label2, "Poll");
+
+    ui_gauge2 = lv_obj_create(ui_Screen1);
+    lv_obj_set_width(ui_gauge2, lv_pct(30));
+    lv_obj_set_height(ui_gauge2, lv_pct(40));
+    lv_obj_set_x(ui_gauge2, lv_pct(-15));
+    lv_obj_set_y(ui_gauge2, lv_pct(20));
+    lv_obj_set_align(ui_gauge2, LV_ALIGN_CENTER);
+    lv_obj_clear_flag(ui_gauge2, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_piddropdown2 = lv_dropdown_create(ui_gauge2);
+    lv_dropdown_set_options(ui_piddropdown2, "PID NAME ");
+    lv_obj_set_width(ui_piddropdown2, lv_pct(125));
+    lv_obj_set_height(ui_piddropdown2, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_x(ui_piddropdown2, lv_pct(0));
+    lv_obj_set_y(ui_piddropdown2, lv_pct(-20));
+    lv_obj_set_align(ui_piddropdown2, LV_ALIGN_TOP_MID);
+    lv_obj_add_flag(ui_piddropdown2, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_piddropdown2, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_unitdropdown2 = lv_dropdown_create(ui_gauge2);
+    lv_dropdown_set_options(ui_unitdropdown2, "PID UNIT");
+    lv_obj_set_width(ui_unitdropdown2, lv_pct(125));
+    lv_obj_set_height(ui_unitdropdown2, LV_SIZE_CONTENT);    /// 25
+    lv_obj_set_x(ui_unitdropdown2, lv_pct(0));
+    lv_obj_set_y(ui_unitdropdown2, lv_pct(20));
+    lv_obj_set_align(ui_unitdropdown2, LV_ALIGN_BOTTOM_MID);
+    lv_obj_add_flag(ui_unitdropdown2, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_unitdropdown2, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_gaugeText2 = lv_label_create(ui_gauge2);
+    lv_obj_set_width(ui_gaugeText2, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_gaugeText2, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_gaugeText2, LV_ALIGN_CENTER);
+    lv_obj_set_style_text_font(ui_gaugeText2, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_gauge3 = lv_obj_create(ui_Screen1);
+    lv_obj_set_width(ui_gauge3, lv_pct(30));
+    lv_obj_set_height(ui_gauge3, lv_pct(40));
+    lv_obj_set_x(ui_gauge3, lv_pct(15));
+    lv_obj_set_y(ui_gauge3, lv_pct(-20));
+    lv_obj_set_align(ui_gauge3, LV_ALIGN_CENTER);
+    lv_obj_clear_flag(ui_gauge3, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_piddropdown3 = lv_dropdown_create(ui_gauge3);
+    lv_dropdown_set_options(ui_piddropdown3, "PID NAME ");
+    lv_obj_set_width(ui_piddropdown3, lv_pct(125));
+    lv_obj_set_height(ui_piddropdown3, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_x(ui_piddropdown3, lv_pct(0));
+    lv_obj_set_y(ui_piddropdown3, lv_pct(-20));
+    lv_obj_set_align(ui_piddropdown3, LV_ALIGN_TOP_MID);
+    lv_obj_add_flag(ui_piddropdown3, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_piddropdown3, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_unitdropdown3 = lv_dropdown_create(ui_gauge3);
+    lv_dropdown_set_options(ui_unitdropdown3, "PID UNIT");
+    lv_obj_set_width(ui_unitdropdown3, lv_pct(125));
+    lv_obj_set_height(ui_unitdropdown3, LV_SIZE_CONTENT);    /// 25
+    lv_obj_set_x(ui_unitdropdown3, lv_pct(0));
+    lv_obj_set_y(ui_unitdropdown3, lv_pct(20));
+    lv_obj_set_align(ui_unitdropdown3, LV_ALIGN_BOTTOM_MID);
+    lv_obj_add_flag(ui_unitdropdown3, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_unitdropdown3, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_gaugeText3 = lv_label_create(ui_gauge3);
+    lv_obj_set_width(ui_gaugeText3, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_gaugeText3, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_gaugeText3, LV_ALIGN_CENTER);
+    lv_obj_set_style_text_font(ui_gaugeText3, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_gauge4 = lv_obj_create(ui_Screen1);
+    lv_obj_set_width(ui_gauge4, lv_pct(30));
+    lv_obj_set_height(ui_gauge4, lv_pct(40));
+    lv_obj_set_x(ui_gauge4, lv_pct(15));
+    lv_obj_set_y(ui_gauge4, lv_pct(20));
+    lv_obj_set_align(ui_gauge4, LV_ALIGN_CENTER);
+    lv_obj_clear_flag(ui_gauge4, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_piddropdown4 = lv_dropdown_create(ui_gauge4);
+    lv_dropdown_set_options(ui_piddropdown4, "PID NAME ");
+    lv_obj_set_width(ui_piddropdown4, lv_pct(125));
+    lv_obj_set_height(ui_piddropdown4, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_x(ui_piddropdown4, lv_pct(0));
+    lv_obj_set_y(ui_piddropdown4, lv_pct(-20));
+    lv_obj_set_align(ui_piddropdown4, LV_ALIGN_TOP_MID);
+    lv_obj_add_flag(ui_piddropdown4, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_piddropdown4, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_unitdropdown4 = lv_dropdown_create(ui_gauge4);
+    lv_dropdown_set_options(ui_unitdropdown4, "PID UNIT");
+    lv_obj_set_width(ui_unitdropdown4, lv_pct(125));
+    lv_obj_set_height(ui_unitdropdown4, LV_SIZE_CONTENT);    /// 25
+    lv_obj_set_x(ui_unitdropdown4, lv_pct(0));
+    lv_obj_set_y(ui_unitdropdown4, lv_pct(20));
+    lv_obj_set_align(ui_unitdropdown4, LV_ALIGN_BOTTOM_MID);
+    lv_obj_add_flag(ui_unitdropdown4, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_set_style_text_font(ui_unitdropdown4, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_gaugeText4 = lv_label_create(ui_gauge4);
+    lv_obj_set_width(ui_gaugeText4, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_gaugeText4, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_gaugeText4, LV_ALIGN_CENTER);
+    lv_obj_set_style_text_font(ui_gaugeText4, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_add_event_cb(ui_connectCAN, ui_event_connectCAN, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_pollCAN1, ui_event_pollCAN1, LV_EVENT_ALL, NULL);
@@ -122,10 +239,22 @@ void ui_Screen1_screen_destroy(void)
     ui_Label1 = NULL;
     ui_gauge1 = NULL;
     ui_piddropdown1 = NULL;
-    ui_unnitdropdown2 = NULL;
+    ui_unitdropdown1 = NULL;
     ui_gaugeText1 = NULL;
     ui_vehicleInfoLabel1 = NULL;
     ui_pollCAN1 = NULL;
     ui_Label2 = NULL;
+    ui_gauge2 = NULL;
+    ui_piddropdown2 = NULL;
+    ui_unitdropdown2 = NULL;
+    ui_gaugeText2 = NULL;
+    ui_gauge3 = NULL;
+    ui_piddropdown3 = NULL;
+    ui_unitdropdown3 = NULL;
+    ui_gaugeText3 = NULL;
+    ui_gauge4 = NULL;
+    ui_piddropdown4 = NULL;
+    ui_unitdropdown4 = NULL;
+    ui_gaugeText4 = NULL;
 
 }

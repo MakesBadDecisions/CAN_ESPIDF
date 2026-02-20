@@ -46,14 +46,18 @@ The primary user interaction flow:
 - [x] Configure lv_conf.h for ESP32-S3 with PSRAM framebuffer
 - [x] Implement `connectCAN()` -- trigger vehicle scan via comm_link
 - [x] Populate PID dropdown from PID metadata received from CAN Interface
-- [ ] Populate unit dropdown based on selected PID
-- [ ] Handle PID selection change -- bind gauge to PID
-- [ ] Handle unit selection change -- convert and display in selected unit
+- [x] Populate unit dropdown based on selected PID
+- [x] Handle PID selection change -- update unit dropdown and hot-swap active poll
+- [x] Handle unit selection change -- convert and display in selected unit
 - [x] Implement `pollCAN()` -- start/stop toggle, poll selected PID at 10Hz, update gauge via lv_timer
 - [x] Update `ui_gaugeText1` from comm_link PID store (periodic refresh)
 - [ ] Add status label for connection state (DISCONNECTED/CONNECTING/CONNECTED)
 - [x] Add VIN display area for vehicle identification (ui_vehicleInfoLabel1)
-- [ ] Add multi-gauge layout screen with 2-6 configurable gauges
+- [x] Add multi-gauge layout screen with 4 configurable gauges (2x2 grid)
+- [x] Table-driven gauge_widget_t[] maps slot index to LVGL widget pointers
+- [x] Generic on_pid_changed / on_unit_changed callbacks (slot found by lv_event_get_target match)
+- [x] LVGL timer (100ms) calls gauge_engine_update() then pushes value_str to all gauge labels
+- [ ] Persist per-gauge PID and unit selections to NVS
 
 ## system/
 
@@ -126,17 +130,24 @@ The primary user interaction flow:
 
 ## gauge_engine/
 
-- [ ] Gauge type definitions -- numeric, horizontal bar, vertical bar, sweep (radial dial)
-- [ ] Gauge struct -- PID binding, position, size, min/max range, label, unit string
-- [ ] Layout struct -- array of gauge definitions, screen arrangement
-- [ ] Layout storage -- save/load layouts to/from NVS
-- [ ] Numeric gauge renderer -- large value text, label, unit
-- [ ] Bar gauge renderer -- filled rectangle, tick marks, color gradient
-- [ ] Sweep gauge renderer -- arc/dial with needle, tick marks, value label
-- [ ] Value smoothing -- low-pass filter or EMA for jitter reduction
-- [ ] Alert threshold evaluation -- compare against WARNING and CRITICAL limits
-- [ ] Alert rendering -- color changes (normal/yellow/red), border flash
-- [ ] Alert audio feedback -- I2S audio or GPIO buzzer on CRITICAL alerts
+- [x] gauge_slot_t struct -- PID binding, base/display unit, raw/display value, formatted string
+- [x] Slot array (GAUGE_MAX_SLOTS=20) with FreeRTOS mutex protection
+- [x] gauge_engine_init() -- zero all slots, create mutex
+- [x] gauge_engine_set_pid() -- assign PID from comm_link metadata index, set base unit
+- [x] gauge_engine_set_unit() -- change display unit (0=base, 1+=alternates from pid_types)
+- [x] gauge_engine_clear_slot() -- un-assign a gauge slot
+- [x] gauge_engine_get_slot() -- read-only pointer to slot state
+- [x] gauge_engine_get_unit_options() -- build unit dropdown string for slot's PID
+- [x] gauge_engine_build_pid_options() -- build PID dropdown string from scan metadata
+- [x] gauge_engine_start_polling() / stop_polling() -- aggregate PIDs into deduplicated poll list
+- [x] gauge_engine_update() -- read latest values, apply unit conversion, format value_str
+- [x] gauge_engine_rebuild_poll_list() -- re-aggregate after PID change during active polling
+- [x] Wired into main.c boot sequence (Phase 7)
+- [x] No LVGL dependency -- pure data manager
+- [ ] NVS persistence -- save/load per-slot PID and unit assignments
+- [ ] Alert thresholds -- warning/critical limits per slot
+- [ ] Value smoothing -- low-pass filter or EMA for jittery readings
+- [ ] Gauge type renderers -- sweep dials, bar graphs (currently numeric-only via LVGL labels)
 
 ## data_logger/
 
@@ -172,8 +183,9 @@ The primary user interaction flow:
 ## main/
 
 - [x] `main.c` -- app_main entry point with boot sequence
-- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link
+- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link -> gauge_engine_init
 - [x] `main.c` -- error handling for init failures (continue with degraded functionality)
+- [x] `main.c` -- gauge_engine_init() wired as Phase 7 after comm_link_start()
 - [x] `CMakeLists.txt` -- register all components
 - [ ] `partitions.csv` -- verify partition table for OTA support
 

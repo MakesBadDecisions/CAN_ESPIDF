@@ -30,7 +30,7 @@ The primary target hardware is the **Elecrow CrowPanel 4.3" (DIS06043H)** — an
 | display_driver | `components/display_driver/` | RGB parallel LCD driver, LVGL integration, double-FB anti-tearing |
 | touch_driver | `components/touch_driver/` | XPT2046 resistive touch (SPI), Core 0 polling task, 4-corner calibration, NVS persistence |
 | ui | `components/ui/` | SquareLine Studio generated LVGL screens and widgets |
-| gauge_engine | `components/gauge_engine/` | Gauge rendering (numeric, bar, sweep/dial), layout management, alert/warning system |
+| gauge_engine | `components/gauge_engine/` | Gauge data manager -- per-slot PID assignment, unit conversion, poll list aggregation, value formatting (no LVGL dependency) |
 | data_logger | `components/data_logger/` | SD card CSV logging, session management, write buffering, file rotation |
 | wifi_manager | `components/wifi_manager/` | WiFi AP mode, HTTP server for log browsing/download, gauge config web UI, CAN node config proxy |
 | system | `components/system/` | Logging wrapper, NVS init, timing utilities |
@@ -62,7 +62,7 @@ CAN_Display/
     ├── display_driver/     # RGB parallel LCD + LVGL (double FB, bounce buffers, VSYNC)
     ├── touch_driver/       # XPT2046 SPI touch (Core 0 task, calibration, NVS)
     ├── ui/                 # SquareLine Studio generated LVGL UI
-    ├── gauge_engine/       # Gauge rendering and alerts
+    ├── gauge_engine/       # Gauge data manager (PID state, unit conversion, poll list)
     ├── data_logger/        # SD card CSV logging
     ├── wifi_manager/       # WiFi AP, HTTP server, CAN node config proxy
     ├── system/             # Logging, NVS, timing
@@ -161,6 +161,10 @@ The actual boot sequence as implemented in `main.c`:
 6. comm_link_init() + comm_link_start()
    - Initialize UART peripheral
    - Start RX task for incoming PID data
+
+7. gauge_engine_init()
+   - Zero all gauge slots, create mutex
+   - Ready for UI to assign PIDs after scan
 ```
 
 Non-critical failures (touch, SD card) are logged but do not halt boot.
@@ -191,11 +195,24 @@ Non-critical failures (touch, SD card) are logged but do not halt boot.
        ┌────────┴───┐   ┌────┴──────────┐
        │  Gauge     │   │  Data Logger   │
        │  Engine    │   │  (TODO)        │
-       │  + LVGL UI │   │               │
-       │            │   │  Output:       │
-       │  Output:   │   │  CSV on SD     │
-       │  Display   │   │               │
-       └────────────┘   └───────────────┘
+       │            │   │               │
+       │  Per-slot  │   │  Output:       │
+       │  PID state,│   │  CSV on SD     │
+       │  unit conv,│   │               │
+       │  value fmt │   └───────────────┘
+       └──────┬─────┘
+              |
+       ┌──────┴──────┐
+       │  UI Layer   │
+       │  (LVGL)     │
+       │             │
+       │  Table-     │
+       │  driven     │
+       │  widget map │
+       │             │
+       │  Output:    │
+       │  Display    │
+       └─────────────┘
 ```
 
 ## Build Instructions

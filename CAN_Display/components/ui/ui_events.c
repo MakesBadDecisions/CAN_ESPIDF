@@ -6,33 +6,59 @@
 #include "ui.h"
 #include "comm_link.h"
 #include "display_driver.h"
-#include "pid_types.h"
+#include "gauge_engine.h"
 #include "esp_log.h"
 #include "screens/ui_Screen1.h"
 #include <stdio.h>
+#include <string.h>
 
 static const char *TAG = "ui_events";
 
-// Polling state
-static bool       s_polling = false;
+// ============================================================================
+// Table-driven gauge widget mapping
+//
+// Each entry links a gauge_engine slot index to its LVGL widgets.
+// To add more gauges: add rows here + create widgets in SquareLine.
+// ============================================================================
+
+typedef struct {
+    lv_obj_t **pid_dropdown;    // PID selector
+    lv_obj_t **unit_dropdown;   // Unit selector
+    lv_obj_t **value_label;     // Numeric value text
+} gauge_widget_t;
+
+// Screen1 has 4 gauges -- just extend this array for more
+static const gauge_widget_t s_gauge_widgets[] = {
+    { &ui_piddropdown1, &ui_unitdropdown1, &ui_gaugeText1 },
+    { &ui_piddropdown2, &ui_unitdropdown2, &ui_gaugeText2 },
+    { &ui_piddropdown3, &ui_unitdropdown3, &ui_gaugeText3 },
+    { &ui_piddropdown4, &ui_unitdropdown4, &ui_gaugeText4 },
+};
+
+#define NUM_GAUGE_WIDGETS (sizeof(s_gauge_widgets) / sizeof(s_gauge_widgets[0]))
+
+// ============================================================================
+// Timers
+// ============================================================================
+
 static lv_timer_t *s_gauge_timer = NULL;
-static uint16_t   s_poll_pid = 0;
-static pid_unit_t s_display_unit = PID_UNIT_NONE;  // current display unit
-static pid_unit_t s_base_unit    = PID_UNIT_NONE;  // PID's native unit
 
 // Scan timeout (10 seconds)
 #define SCAN_TIMEOUT_MS  10000
 static lv_timer_t *s_scan_timer = NULL;
 
+// Track whether events have been wired (once per dropdown)
+static bool s_events_registered = false;
+
 // ============================================================================
-// Scan Timeout Timer (runs inside LVGL task)
+// Scan Timeout Timer
 // ============================================================================
 
 static void scan_timeout_cb(lv_timer_t *timer)
 {
     (void)timer;
     s_scan_timer = NULL;
-    
+
     if (comm_link_get_scan_status() != SCAN_STATUS_COMPLETE) {
         ESP_LOGW(TAG, "Scan timed out after %d ms", SCAN_TIMEOUT_MS);
         lv_label_set_text(ui_Label1, "Connect");
@@ -40,65 +66,139 @@ static void scan_timeout_cb(lv_timer_t *timer)
     }
 }
 
-// Forward declarations
-void unitChanged(lv_event_t *e);
-
 // ============================================================================
-// Gauge Update Timer (runs inside LVGL task, lock already held)
+// Gauge Update Timer (10 Hz, LVGL task context)
 // ============================================================================
 
 static void gauge_update_cb(lv_timer_t *timer)
 {
     (void)timer;
-    pid_value_t val;
-    if (comm_link_get_pid(s_poll_pid, &val)) {
-        float display_val = val.value;
-        // Convert to display unit if different from base
-        if (s_display_unit != s_base_unit) {
-            pid_unit_convert(val.value, s_base_unit, s_display_unit, &display_val);
+
+    // Let gauge_engine fetch values + convert + format strings
+    gauge_engine_update();
+
+    // Push formatted strings to LVGL labels
+    for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+        const gauge_slot_t *g = gauge_engine_get_slot(i);
+        if (!g || g->pid_id == 0xFFFF) continue;
+
+        lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+        if (label) {
+            lv_label_set_text(label, g->value_str);
         }
-        static char buf[16];
-        snprintf(buf, sizeof(buf), "%.1f", display_val);
-        lv_label_set_text(ui_gaugeText1, buf);
     }
 }
 
 // ============================================================================
-// Populate Unit Dropdown for a PID
+// PID Dropdown Changed (any gauge)
 // ============================================================================
 
-static void populate_unit_dropdown(uint16_t pid_id)
+static void on_pid_changed(lv_event_t *e)
 {
-    pid_unit_t base = comm_link_get_pid_unit(pid_id);
-    s_base_unit = base;
-    s_display_unit = base;
+    lv_obj_t *dropdown = lv_event_get_target(e);
 
-    // Start with the base unit
-    static char opts[128];
-    int pos = 0;
-    const char *base_str = pid_unit_str(base);
-    pos += snprintf(opts + pos, sizeof(opts) - pos, "%s", 
-                    (base_str && base_str[0]) ? base_str : "raw");
+    // Find which gauge slot this dropdown belongs to
+    for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+        if (*(s_gauge_widgets[i].pid_dropdown) != dropdown) continue;
 
-    // Add convertible alternatives
-    pid_unit_t alts[4];
-    int alt_count = pid_unit_get_alts(base, alts, 4);
-    for (int i = 0; i < alt_count; i++) {
-        const char *alt_str = pid_unit_str(alts[i]);
-        if (alt_str && alt_str[0]) {
-            pos += snprintf(opts + pos, sizeof(opts) - pos, "\n%s", alt_str);
+        uint16_t sel = lv_dropdown_get_selected(dropdown);
+        gauge_engine_set_pid(i, sel);
+
+        // Refresh unit dropdown for this gauge
+        static char unit_opts[GAUGE_UNIT_OPTS_LEN];
+        gauge_engine_get_unit_options(i, unit_opts, sizeof(unit_opts));
+        lv_obj_t *unit_dd = *(s_gauge_widgets[i].unit_dropdown);
+        if (unit_dd) {
+            lv_dropdown_set_options(unit_dd, unit_opts);
+            lv_dropdown_set_selected(unit_dd, 0);
+        }
+
+        // Reset value display
+        lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+        if (label) lv_label_set_text(label, "---");
+
+        const gauge_slot_t *g = gauge_engine_get_slot(i);
+        ESP_LOGI(TAG, "Gauge %d -> PID 0x%04X", i, g ? g->pid_id : 0xFFFF);
+        return;
+    }
+}
+
+// ============================================================================
+// Unit Dropdown Changed (any gauge)
+// ============================================================================
+
+static void on_unit_changed(lv_event_t *e)
+{
+    lv_obj_t *dropdown = lv_event_get_target(e);
+
+    for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+        if (*(s_gauge_widgets[i].unit_dropdown) != dropdown) continue;
+
+        uint16_t sel = lv_dropdown_get_selected(dropdown);
+        gauge_engine_set_unit(i, sel);
+
+        // Immediately update the label if we have a value
+        const gauge_slot_t *g = gauge_engine_get_slot(i);
+        if (g && g->value_valid) {
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_label_set_text(label, g->value_str);
+        }
+
+        ESP_LOGI(TAG, "Gauge %d unit index -> %d", i, sel);
+        return;
+    }
+}
+
+// ============================================================================
+// Register dropdown events for all gauge widgets (once)
+// ============================================================================
+
+static void register_gauge_events(void)
+{
+    if (s_events_registered) return;
+
+    for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+        lv_obj_t *pid_dd  = *(s_gauge_widgets[i].pid_dropdown);
+        lv_obj_t *unit_dd = *(s_gauge_widgets[i].unit_dropdown);
+
+        if (pid_dd)  lv_obj_add_event_cb(pid_dd,  on_pid_changed,  LV_EVENT_VALUE_CHANGED, NULL);
+        if (unit_dd) lv_obj_add_event_cb(unit_dd, on_unit_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+
+    s_events_registered = true;
+    ESP_LOGI(TAG, "Registered events for %d gauge widgets", (int)NUM_GAUGE_WIDGETS);
+}
+
+// ============================================================================
+// Populate all PID dropdowns with scan results
+// ============================================================================
+
+static void populate_all_pid_dropdowns(void)
+{
+    static char pid_opts[2048];
+    int count = gauge_engine_build_pid_options(pid_opts, sizeof(pid_opts));
+    if (count == 0) return;
+
+    for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+        lv_obj_t *dd = *(s_gauge_widgets[i].pid_dropdown);
+        if (dd) {
+            lv_dropdown_set_options(dd, pid_opts);
         }
     }
 
-    lv_dropdown_set_options(ui_unnitdropdown2, opts);
-    lv_dropdown_set_selected(ui_unnitdropdown2, 0);
+    // Auto-select first PID and populate unit dropdown for gauge 0
+    gauge_engine_set_pid(0, 0);
 
-    // Wire up unit change event (once)
-    static bool s_unit_event_registered = false;
-    if (!s_unit_event_registered) {
-        lv_obj_add_event_cb(ui_unnitdropdown2, unitChanged, LV_EVENT_VALUE_CHANGED, NULL);
-        s_unit_event_registered = true;
+    static char unit_opts[GAUGE_UNIT_OPTS_LEN];
+    gauge_engine_get_unit_options(0, unit_opts, sizeof(unit_opts));
+    lv_obj_t *unit_dd = *(s_gauge_widgets[0].unit_dropdown);
+    if (unit_dd) {
+        lv_dropdown_set_options(unit_dd, unit_opts);
+        lv_dropdown_set_selected(unit_dd, 0);
     }
+
+    ESP_LOGI(TAG, "Populated %d gauge dropdowns with %d PIDs",
+             (int)NUM_GAUGE_WIDGETS, count);
 }
 
 // ============================================================================
@@ -125,28 +225,14 @@ static void on_scan_complete(scan_status_t status, const comm_vehicle_info_t *in
         static char vin_text[32];
         snprintf(vin_text, sizeof(vin_text), "VIN: %.17s", info->vin);
         lv_label_set_text(ui_vehicleInfoLabel1, vin_text);
-
-        // Update button text
         lv_label_set_text(ui_Label1, "Scan");
 
-        // Populate PID dropdown from metadata store
-        int meta_count = comm_link_get_pid_meta_count();
-        if (meta_count > 0) {
-            static char dropdown_opts[2048];
-            int pos = 0;
-            for (int i = 0; i < meta_count && pos < (int)sizeof(dropdown_opts) - 64; i++) {
-                uint16_t pid_id = comm_link_get_meta_pid_id(i);
-                const char *name = comm_link_get_pid_name(pid_id);
-                if (pid_id != 0xFFFF && name) {
-                    pos += snprintf(dropdown_opts + pos, sizeof(dropdown_opts) - pos,
-                                   "0x%02X %s\n", pid_id, name);
-                }
-            }
-            if (pos > 0) dropdown_opts[pos - 1] = '\0';
+        // Populate all gauge PID dropdowns
+        populate_all_pid_dropdowns();
 
-            lv_dropdown_set_options(ui_piddropdown1, dropdown_opts);
-            ESP_LOGI(TAG, "Populated dropdown with %d PIDs", meta_count);
-        }
+        // Wire up dropdown events (idempotent)
+        register_gauge_events();
+
     } else {
         ESP_LOGW(TAG, "Scan failed with status %d", status);
         lv_label_set_text(ui_Label1, "Connect");
@@ -186,85 +272,53 @@ void connectCAN(lv_event_t * e)
 }
 
 // ============================================================================
-// Poll Button - Start/Stop Polling Selected PID
+// Poll Button - Start/Stop Polling All Assigned Gauges
 // ============================================================================
 
 void pollCAN(lv_event_t * e)
 {
     (void)e;
 
-    if (s_polling) {
-        // Stop polling
-        comm_link_clear_poll_list();
+    if (gauge_engine_is_polling()) {
+        // Stop
+        gauge_engine_stop_polling();
         lv_label_set_text(ui_Label2, "Poll");
-        lv_label_set_text(ui_gaugeText1, "---");
+
+        // Clear all gauge displays
+        for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_label_set_text(label, "---");
+        }
+
         if (s_gauge_timer) {
             lv_timer_del(s_gauge_timer);
             s_gauge_timer = NULL;
         }
-        s_polling = false;
+
         ESP_LOGI(TAG, "Polling stopped");
         return;
     }
 
     // Must scan first
-    int meta_count = comm_link_get_pid_meta_count();
-    if (meta_count == 0) {
+    if (comm_link_get_pid_meta_count() == 0) {
         ESP_LOGW(TAG, "No PID metadata - scan vehicle first");
         return;
     }
 
-    // Get selected PID from dropdown
-    uint16_t selected_idx = lv_dropdown_get_selected(ui_piddropdown1);
-    uint16_t pid_id = comm_link_get_meta_pid_id(selected_idx);
-    if (pid_id == 0xFFFF) {
-        ESP_LOGW(TAG, "Invalid PID selection");
-        return;
-    }
-
-    s_poll_pid = pid_id;
-
-    // Populate unit dropdown with base + alt units for this PID
-    populate_unit_dropdown(pid_id);
-
-    // Send poll list with single PID at 10 Hz
-    esp_err_t err = comm_link_set_poll_list(&pid_id, 1, 10);
+    // Start polling all assigned PIDs
+    esp_err_t err = gauge_engine_start_polling(10);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set poll list: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "No PIDs assigned to any gauge");
         return;
     }
 
-    // Start gauge update timer (100ms = 10 Hz, runs in LVGL task context)
-    s_gauge_timer = lv_timer_create(gauge_update_cb, 100, NULL);
+    // Start LVGL update timer (100ms = 10 Hz)
+    if (!s_gauge_timer) {
+        s_gauge_timer = lv_timer_create(gauge_update_cb, 100, NULL);
+    }
 
     lv_label_set_text(ui_Label2, "Stop");
-    s_polling = true;
 
-    const char *name = comm_link_get_pid_name(pid_id);
-    ESP_LOGI(TAG, "Polling PID 0x%04X (%s) @ 10 Hz", pid_id, name ? name : "?");
-}
-
-// ============================================================================
-// Unit Dropdown Changed - Update display unit for conversion
-// ============================================================================
-
-void unitChanged(lv_event_t * e)
-{
-    (void)e;
-    uint16_t sel = lv_dropdown_get_selected(ui_unnitdropdown2);
-
-    if (sel == 0) {
-        // First entry is always the base unit
-        s_display_unit = s_base_unit;
-    } else {
-        // Map to alt unit
-        pid_unit_t alts[4];
-        int alt_count = pid_unit_get_alts(s_base_unit, alts, 4);
-        if ((int)(sel - 1) < alt_count) {
-            s_display_unit = alts[sel - 1];
-        }
-    }
-
-    const char *str = pid_unit_str(s_display_unit);
-    ESP_LOGI(TAG, "Display unit changed to: %s", str ? str : "?");
+    int n = gauge_engine_get_active_pid_count();
+    ESP_LOGI(TAG, "Polling %d unique PIDs @ 10 Hz", n);
 }

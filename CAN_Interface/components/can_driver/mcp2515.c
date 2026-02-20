@@ -315,83 +315,93 @@ static void mcp2515_isr_task(void *arg)
             continue;
         }
         
-        // Read interrupt flags
-        uint8_t canintf = mcp2515_read_register(MCP2515_CANINTF);
-        
-        // Handle RX0 interrupt
-        if (canintf & CANINT_RX0I) {
-            can_frame_t frame;
-            mcp2515_read_rx_buffer(0, &frame);
-            
-            // Dispatch to registered callbacks
-            can_driver_dispatch_rx_callbacks(&frame);
-            
-            if (xQueueSend(s_driver.rx_queue, &frame, 0) == pdTRUE) {
-                s_driver.stats.rx_frames++;
-            } else {
-                s_driver.stats.rx_overflows++;
-            }
-            
-            mcp2515_bit_modify(MCP2515_CANINTF, CANINT_RX0I, 0);
-        }
-        
-        // Handle RX1 interrupt
-        if (canintf & CANINT_RX1I) {
-            can_frame_t frame;
-            mcp2515_read_rx_buffer(1, &frame);
-            
-            // Dispatch to registered callbacks
-            can_driver_dispatch_rx_callbacks(&frame);
-            
-            if (xQueueSend(s_driver.rx_queue, &frame, 0) == pdTRUE) {
-                s_driver.stats.rx_frames++;
-            } else {
-                s_driver.stats.rx_overflows++;
-            }
-            
-            mcp2515_bit_modify(MCP2515_CANINTF, CANINT_RX1I, 0);
-        }
-        
-        // Handle TX complete interrupts
-        if (canintf & (CANINT_TX0I | CANINT_TX1I | CANINT_TX2I)) {
-            mcp2515_bit_modify(MCP2515_CANINTF, 
-                               CANINT_TX0I | CANINT_TX1I | CANINT_TX2I, 0);
-        }
-        
-        // Handle error interrupt
-        if (canintf & CANINT_ERRI) {
-            uint8_t eflg = mcp2515_read_register(MCP2515_EFLG);
-            s_driver.stats.tec = mcp2515_read_register(MCP2515_TEC);
-            s_driver.stats.rec = mcp2515_read_register(MCP2515_REC);
+        // Drain loop: keep processing while the MCP2515 has pending interrupts.
+        // This handles back-to-back frames without relying on GPIO re-triggering.
+        // Yield every N iterations so the IDLE task can feed the watchdog.
+        int iter = 0;
+        uint8_t canintf;
+        while ((canintf = mcp2515_read_register(MCP2515_CANINTF)) != 0) {
 
-            ESP_LOGW(TAG, "Error interrupt: EFLG=0x%02X TEC=%u REC=%u",
-                     eflg, s_driver.stats.tec, s_driver.stats.rec);
+            if (!s_driver.isr_task_running) break;
 
-            if (eflg & EFLG_TXBO) {
-                s_driver.state = CAN_STATE_BUS_OFF;
-                ESP_LOGE(TAG, "Bus-off detected (TEC=%u) - call clear_errors to recover",
-                         s_driver.stats.tec);
-            } else if (eflg & (EFLG_TXEP | EFLG_RXEP)) {
-                s_driver.state = CAN_STATE_ERROR_PASSIVE;
-                ESP_LOGW(TAG, "Error-passive state");
-            } else if (eflg & EFLG_EWARN) {
-                s_driver.state = CAN_STATE_ERROR_WARNING;
+            // Handle RX0 interrupt
+            if (canintf & CANINT_RX0I) {
+                can_frame_t frame;
+                mcp2515_read_rx_buffer(0, &frame);
+
+                can_driver_dispatch_rx_callbacks(&frame);
+
+                if (xQueueSend(s_driver.rx_queue, &frame, 0) == pdTRUE) {
+                    s_driver.stats.rx_frames++;
+                } else {
+                    s_driver.stats.rx_overflows++;
+                }
+
+                mcp2515_bit_modify(MCP2515_CANINTF, CANINT_RX0I, 0);
             }
-            
-            if (eflg & (EFLG_RX0OVR | EFLG_RX1OVR)) {
-                s_driver.stats.rx_overflows++;
-                // Clear overflow flags
-                mcp2515_bit_modify(MCP2515_EFLG, EFLG_RX0OVR | EFLG_RX1OVR, 0);
+
+            // Handle RX1 interrupt
+            if (canintf & CANINT_RX1I) {
+                can_frame_t frame;
+                mcp2515_read_rx_buffer(1, &frame);
+
+                can_driver_dispatch_rx_callbacks(&frame);
+
+                if (xQueueSend(s_driver.rx_queue, &frame, 0) == pdTRUE) {
+                    s_driver.stats.rx_frames++;
+                } else {
+                    s_driver.stats.rx_overflows++;
+                }
+
+                mcp2515_bit_modify(MCP2515_CANINTF, CANINT_RX1I, 0);
             }
-            
-            mcp2515_bit_modify(MCP2515_CANINTF, CANINT_ERRI, 0);
-        }
-        
-        // Handle message error
-        if (canintf & CANINT_MERR) {
-            s_driver.stats.tx_errors++;
-            mcp2515_bit_modify(MCP2515_CANINTF, CANINT_MERR, 0);
-        }
+
+            // Handle TX complete interrupts
+            if (canintf & (CANINT_TX0I | CANINT_TX1I | CANINT_TX2I)) {
+                mcp2515_bit_modify(MCP2515_CANINTF,
+                                   CANINT_TX0I | CANINT_TX1I | CANINT_TX2I, 0);
+            }
+
+            // Handle error interrupt
+            if (canintf & CANINT_ERRI) {
+                uint8_t eflg = mcp2515_read_register(MCP2515_EFLG);
+                s_driver.stats.tec = mcp2515_read_register(MCP2515_TEC);
+                s_driver.stats.rec = mcp2515_read_register(MCP2515_REC);
+
+                ESP_LOGW(TAG, "Error interrupt: EFLG=0x%02X TEC=%u REC=%u",
+                         eflg, s_driver.stats.tec, s_driver.stats.rec);
+
+                if (eflg & EFLG_TXBO) {
+                    s_driver.state = CAN_STATE_BUS_OFF;
+                    ESP_LOGE(TAG, "Bus-off (TEC=%u) - call clear_errors to recover",
+                             s_driver.stats.tec);
+                } else if (eflg & (EFLG_TXEP | EFLG_RXEP)) {
+                    s_driver.state = CAN_STATE_ERROR_PASSIVE;
+                    ESP_LOGW(TAG, "Error-passive state");
+                } else if (eflg & EFLG_EWARN) {
+                    s_driver.state = CAN_STATE_ERROR_WARNING;
+                }
+
+                if (eflg & (EFLG_RX0OVR | EFLG_RX1OVR)) {
+                    s_driver.stats.rx_overflows++;
+                    mcp2515_bit_modify(MCP2515_EFLG, EFLG_RX0OVR | EFLG_RX1OVR, 0);
+                }
+
+                mcp2515_bit_modify(MCP2515_CANINTF, CANINT_ERRI, 0);
+            }
+
+            // Handle message error
+            if (canintf & CANINT_MERR) {
+                s_driver.stats.tx_errors++;
+                mcp2515_bit_modify(MCP2515_CANINTF, CANINT_MERR, 0);
+            }
+
+            // Yield every 8 iterations to prevent watchdog starvation
+            if (++iter >= 8) {
+                taskYIELD();
+                iter = 0;
+            }
+        } // end drain loop
     }
     
     ESP_LOGI(TAG, "ISR task stopped");

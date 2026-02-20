@@ -39,27 +39,51 @@ type for formatting or range-checking.
 (*) Some references use `A` directly for speed; the divisor depends on the
 specific PID definition table in use.
 
-### Unit
+### Unit (pid_unit_t)
 
-Physical or logical unit of the decoded value. Used by the Display node to
-select the correct label and formatting (decimal places, ranges, etc.).
+Physical or logical unit of the decoded value. Used by both nodes for display
+labels, formatting, and unit conversions. The canonical definition is the
+`pid_unit_t` enum in `pid_types.h`. The CAN Interface node's `pid_entry.h`
+provides backward-compatible `unit_t` typedef and `UNIT_*` macros.
 
-| Enumerator  | Meaning                        |
-|-------------|--------------------------------|
-| `RPM`       | Revolutions per minute         |
-| `KMH`       | Kilometers per hour            |
-| `MPH`       | Miles per hour                 |
-| `CELSIUS`   | Degrees Celsius                |
-| `PERCENT`   | Percentage (0--100)            |
-| `VOLT`      | Volts                          |
-| `KPA`       | Kilopascals                    |
-| `GS`        | Grams per second               |
-| `DEGREE`    | Degrees (e.g., timing advance) |
-| `MA`        | Milliamps                      |
-| `SECONDS`   | Seconds                        |
-| `RATIO`     | Dimensionless ratio            |
-| `COUNT`     | Unitless count                 |
-| `NONE`      | No unit / not applicable       |
+| Enumerator       | Meaning                        |
+|------------------|--------------------------------|
+| `PID_UNIT_NONE`  | No unit / not applicable       |
+| `PID_UNIT_RPM`   | Revolutions per minute         |
+| `PID_UNIT_KMH`   | Kilometers per hour            |
+| `PID_UNIT_MPH`   | Miles per hour                 |
+| `PID_UNIT_CELSIUS`| Degrees Celsius               |
+| `PID_UNIT_FAHRENHEIT`| Degrees Fahrenheit         |
+| `PID_UNIT_PERCENT`| Percentage (0--100)           |
+| `PID_UNIT_VOLT`  | Volts                          |
+| `PID_UNIT_KPA`   | Kilopascals                    |
+| `PID_UNIT_PSI`   | Pounds per square inch         |
+| `PID_UNIT_PA`    | Pascals                        |
+| `PID_UNIT_GS`    | Grams per second               |
+| `PID_UNIT_DEGREE`| Degrees (e.g., timing advance) |
+| `PID_UNIT_MA`    | Milliamps                      |
+| `PID_UNIT_SECONDS`| Seconds                       |
+| `PID_UNIT_MS`    | Milliseconds                   |
+| `PID_UNIT_MINUTES`| Minutes                       |
+| `PID_UNIT_KM`    | Kilometers                     |
+| `PID_UNIT_RATIO` | Dimensionless ratio            |
+| `PID_UNIT_COUNT` | Unitless count                 |
+| `PID_UNIT_NM`    | Newton-meters (torque)         |
+| `PID_UNIT_LPH`   | Liters per hour               |
+| `PID_UNIT_MG_STROKE`| Milligrams per stroke       |
+
+### Unit Conversion API
+
+The shared `pid_types.c` provides runtime unit conversion:
+
+- **`pid_unit_str(unit)`** -- returns display string (e.g., `"°C"`, `"rpm"`, `"psi"`)
+- **`pid_unit_convert(value, from, to, &result)`** -- bidirectional conversion
+  between compatible units (C↔F, km/h↔mph, kPa↔PSI, Pa↔kPa)
+- **`pid_unit_get_alts(base, alts[], max)`** -- returns convertible alternatives
+  for a given base unit (e.g., `PID_UNIT_CELSIUS` → `PID_UNIT_FAHRENHEIT`)
+
+The Display node uses these to populate the unit dropdown and convert gauge
+values on-the-fly without needing the CAN Interface node to re-send data.
 
 ### PIDType
 

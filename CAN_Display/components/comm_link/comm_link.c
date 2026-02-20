@@ -64,7 +64,7 @@ static struct {
     uint16_t            rx_idx;
     
     // PID value cache
-    pid_value_t         pid_store[COMM_LINK_PID_STORE_MAX];
+    pid_cache_entry_t   pid_store[COMM_LINK_PID_STORE_MAX];
     SemaphoreHandle_t   pid_mutex;
     
     // Vehicle info
@@ -656,7 +656,7 @@ const comm_link_stats_t* comm_link_get_stats(void)
     return &s_ctx.stats;
 }
 
-bool comm_link_get_pid(uint16_t pid_id, pid_value_t *out_value)
+bool comm_link_get_pid(uint16_t pid_id, pid_cache_entry_t *out_value)
 {
     if (!out_value) {
         return false;
@@ -677,7 +677,7 @@ bool comm_link_get_pid(uint16_t pid_id, pid_value_t *out_value)
     return found;
 }
 
-int comm_link_get_all_pids(pid_value_t *out_values, int max_count)
+int comm_link_get_all_pids(pid_cache_entry_t *out_values, int max_count)
 {
     if (!out_values || max_count <= 0) {
         return 0;
