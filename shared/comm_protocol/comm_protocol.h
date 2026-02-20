@@ -29,6 +29,7 @@ typedef enum {
     MSG_PID_DATA_BATCH  = 0x02,
     MSG_VEHICLE_INFO    = 0x03,
     MSG_DTC_LIST        = 0x04,
+    MSG_PID_METADATA    = 0x05,
     MSG_HEARTBEAT       = 0x10,
     MSG_CONFIG_CMD      = 0x20,
     MSG_CONFIG_RESP     = 0x21,
@@ -159,3 +160,17 @@ typedef struct __attribute__((packed)) {
     uint8_t  reserved[3];               // Padding
     comm_dtc_entry_t dtcs[MAX_DTCS];    // DTC list
 } comm_dtc_list_t;
+
+// ============================================================================
+// PID Metadata (sent after scan, stored in RAM on Display)
+// ============================================================================
+
+#define PID_META_NAME_LEN   32      // Max PID name length (null-terminated)
+#define PID_META_UNIT_LEN   8       // Max unit string length (null-terminated)
+
+typedef struct __attribute__((packed)) {
+    uint16_t pid_id;                        // PID number
+    uint8_t  unit;                          // pid_unit_t enum value (base unit)
+    char     name[PID_META_NAME_LEN];       // Human-readable name
+    char     unit_str[PID_META_UNIT_LEN];   // Unit display string ("RPM", "kPa", etc.)
+} comm_pid_meta_t;

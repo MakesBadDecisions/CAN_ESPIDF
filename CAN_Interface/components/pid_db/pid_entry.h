@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "pid_types.h"
 
 // ============================================================================
 // Formula Types - How to decode raw OBD-II bytes
@@ -52,34 +53,36 @@ typedef enum {
 } pid_type_t;
 
 // ============================================================================
-// Units - Physical units of the decoded value
+// Units — use pid_unit_t from shared/pid_types.h
+// Legacy alias so existing code using unit_t still compiles.
 // ============================================================================
 
-typedef enum {
-    UNIT_NONE,
-    UNIT_RPM,
-    UNIT_KMH,
-    UNIT_MPH,
-    UNIT_CELSIUS,
-    UNIT_FAHRENHEIT,
-    UNIT_PERCENT,
-    UNIT_VOLT,
-    UNIT_KPA,
-    UNIT_PA,
-    UNIT_PSI,
-    UNIT_GS,           // grams per second
-    UNIT_DEGREE,
-    UNIT_MA,
-    UNIT_SECONDS,
-    UNIT_MS,           // Milliseconds
-    UNIT_MINUTES,
-    UNIT_RATIO,
-    UNIT_COUNT,
-    UNIT_KM,
-    UNIT_NM,           // Newton-meters (torque)
-    UNIT_LPH,          // Liters per hour
-    UNIT_MG_STROKE,    // Milligrams per stroke
-} unit_t;
+typedef pid_unit_t unit_t;
+
+// Legacy enum value aliases (map old UNIT_X -> PID_UNIT_X)
+#define UNIT_NONE        PID_UNIT_NONE
+#define UNIT_RPM         PID_UNIT_RPM
+#define UNIT_KMH         PID_UNIT_KMH
+#define UNIT_MPH         PID_UNIT_MPH
+#define UNIT_CELSIUS     PID_UNIT_CELSIUS
+#define UNIT_FAHRENHEIT  PID_UNIT_FAHRENHEIT
+#define UNIT_PERCENT     PID_UNIT_PERCENT
+#define UNIT_VOLT        PID_UNIT_VOLT
+#define UNIT_KPA         PID_UNIT_KPA
+#define UNIT_PA          PID_UNIT_PA
+#define UNIT_PSI         PID_UNIT_PSI
+#define UNIT_GS          PID_UNIT_GS
+#define UNIT_DEGREE      PID_UNIT_DEGREE
+#define UNIT_MA          PID_UNIT_MA
+#define UNIT_SECONDS     PID_UNIT_SECONDS
+#define UNIT_MS          PID_UNIT_MS
+#define UNIT_MINUTES     PID_UNIT_MINUTES
+#define UNIT_RATIO       PID_UNIT_RATIO
+#define UNIT_COUNT       PID_UNIT_COUNT
+#define UNIT_KM          PID_UNIT_KM
+#define UNIT_NM          PID_UNIT_NM
+#define UNIT_LPH         PID_UNIT_LPH
+#define UNIT_MG_STROKE   PID_UNIT_MG_STROKE
 
 // ============================================================================
 // Formula Parameters

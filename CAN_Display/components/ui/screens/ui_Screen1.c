@@ -13,6 +13,8 @@ lv_obj_t * ui_piddropdown1 = NULL;
 lv_obj_t * ui_unnitdropdown2 = NULL;
 lv_obj_t * ui_gaugeText1 = NULL;
 lv_obj_t * ui_vehicleInfoLabel1 = NULL;
+lv_obj_t * ui_pollCAN1 = NULL;
+lv_obj_t * ui_Label2 = NULL;
 // event funtions
 void ui_event_connectCAN(lv_event_t * e)
 {
@@ -20,6 +22,15 @@ void ui_event_connectCAN(lv_event_t * e)
 
     if(event_code == LV_EVENT_CLICKED) {
         connectCAN(e);
+    }
+}
+
+void ui_event_pollCAN1(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+
+    if(event_code == LV_EVENT_CLICKED) {
+        pollCAN(e);
     }
 }
 
@@ -36,7 +47,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_connectCAN, lv_pct(20));
     lv_obj_set_height(ui_connectCAN, lv_pct(15));
     lv_obj_set_x(ui_connectCAN, lv_pct(-15));
-    lv_obj_set_y(ui_connectCAN, lv_pct(0));
+    lv_obj_set_y(ui_connectCAN, lv_pct(-10));
     lv_obj_set_align(ui_connectCAN, LV_ALIGN_CENTER);
     lv_obj_add_flag(ui_connectCAN, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_connectCAN, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
@@ -81,7 +92,23 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_align(ui_vehicleInfoLabel1, LV_ALIGN_TOP_MID);
     lv_label_set_text(ui_vehicleInfoLabel1, "Vehicle Info");
 
+    ui_pollCAN1 = lv_btn_create(ui_Screen1);
+    lv_obj_set_width(ui_pollCAN1, lv_pct(20));
+    lv_obj_set_height(ui_pollCAN1, lv_pct(15));
+    lv_obj_set_x(ui_pollCAN1, lv_pct(-15));
+    lv_obj_set_y(ui_pollCAN1, lv_pct(10));
+    lv_obj_set_align(ui_pollCAN1, LV_ALIGN_CENTER);
+    lv_obj_add_flag(ui_pollCAN1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_pollCAN1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_Label2 = lv_label_create(ui_pollCAN1);
+    lv_obj_set_width(ui_Label2, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_Label2, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_Label2, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_Label2, "Poll");
+
     lv_obj_add_event_cb(ui_connectCAN, ui_event_connectCAN, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(ui_pollCAN1, ui_event_pollCAN1, LV_EVENT_ALL, NULL);
 
 }
 
@@ -98,5 +125,7 @@ void ui_Screen1_screen_destroy(void)
     ui_unnitdropdown2 = NULL;
     ui_gaugeText1 = NULL;
     ui_vehicleInfoLabel1 = NULL;
+    ui_pollCAN1 = NULL;
+    ui_Label2 = NULL;
 
 }

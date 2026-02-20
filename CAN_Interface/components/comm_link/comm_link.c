@@ -259,8 +259,13 @@ static void rx_task(void *arg)
                     expected_len = COMM_HEADER_SIZE + hdr->payload_len + COMM_CRC_SIZE;
                     
                     if (expected_len > RX_BUF_SIZE) {
-                        SYS_LOGW(TAG, "Frame too large: %u", expected_len);
-                        s_ctx.stats.rx_overflows++;
+                        SYS_LOGW(TAG, "Framing error: payload_len=%u (type=0x%02X seq=%u) - "
+                                 "flushing RX buffer",
+                                 hdr->payload_len, hdr->msg_type, hdr->sequence);
+                        // Flush the UART RX buffer so we re-sync on the next real start byte
+                        // rather than processing the remaining bytes of the corrupted frame.
+                        uart_flush_input(UART_NUM);
+                        s_ctx.stats.rx_errors++;
                         rx_state = STATE_IDLE;
                     } else if (hdr->payload_len == 0) {
                         // No payload, just need CRC
@@ -530,6 +535,21 @@ esp_err_t comm_link_send_scan_status(scan_status_t status, uint16_t ecu_count, u
     };
     
     return send_frame(MSG_SCAN_STATUS, &scan, sizeof(comm_scan_status_t));
+}
+
+esp_err_t comm_link_send_pid_metadata(const comm_pid_meta_t *entries, uint8_t count)
+{
+    if (!entries || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    uint16_t payload_len = count * sizeof(comm_pid_meta_t);
+    if (payload_len > COMM_MAX_PAYLOAD) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    SYS_LOGD(TAG, "Sending PID metadata batch: %u entries", count);
+    return send_frame(MSG_PID_METADATA, entries, payload_len);
 }
 
 esp_err_t comm_link_register_cmd_callback(comm_cmd_callback_t callback)

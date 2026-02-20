@@ -47,7 +47,134 @@ static void pid_value_callback(uint16_t pid, float value, uint8_t unit)
 }
 
 // ============================================================================
+// Scan Task - Runs OBD2 scan in its own task so rx_task stays responsive
+// ============================================================================
+
+static TaskHandle_t s_scan_task_handle = NULL;
+static volatile bool s_scan_pending = false;
+
+static void scan_task(void *arg)
+{
+    while (1) {
+        // Wait for scan request from cmd_callback
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        
+        SYS_LOGI(TAG, "Vehicle scan starting...");
+        
+        // Send scan in-progress status
+        comm_link_send_scan_status(SCAN_STATUS_IN_PROGRESS, 0, 0);
+        
+        // Build vehicle info
+        comm_vehicle_info_t info;
+        memset(&info, 0, sizeof(info));
+        
+        // Read VIN
+        esp_err_t ret = obd2_read_vin(info.vin, sizeof(info.vin));
+        if (ret != ESP_OK) {
+            SYS_LOGW(TAG, "Failed to read VIN: %s", esp_err_to_name(ret));
+            strcpy(info.vin, "UNKNOWN_VIN_12345");
+        }
+        
+        // Read supported PIDs bitmaps
+        uint32_t bitmap;
+        int pid_count = 0;
+        
+        // PIDs 0x01-0x20
+        if (obd2_get_supported_pids(0x00, &bitmap) == ESP_OK) {
+            info.supported_pids[0] = (bitmap >> 24) & 0xFF;
+            info.supported_pids[1] = (bitmap >> 16) & 0xFF;
+            info.supported_pids[2] = (bitmap >> 8) & 0xFF;
+            info.supported_pids[3] = bitmap & 0xFF;
+            pid_count += __builtin_popcount(bitmap);
+            
+            // PIDs 0x21-0x40
+            if (bitmap & 0x01) {  // PID 0x20 indicates more PIDs
+                if (obd2_get_supported_pids(0x20, &bitmap) == ESP_OK) {
+                    info.supported_pids[4] = (bitmap >> 24) & 0xFF;
+                    info.supported_pids[5] = (bitmap >> 16) & 0xFF;
+                    info.supported_pids[6] = (bitmap >> 8) & 0xFF;
+                    info.supported_pids[7] = bitmap & 0xFF;
+                    pid_count += __builtin_popcount(bitmap);
+                    
+                    // PIDs 0x41-0x60
+                    if (bitmap & 0x01) {  // PID 0x40 indicates more
+                        if (obd2_get_supported_pids(0x40, &bitmap) == ESP_OK) {
+                            info.supported_pids[8] = (bitmap >> 24) & 0xFF;
+                            info.supported_pids[9] = (bitmap >> 16) & 0xFF;
+                            info.supported_pids[10] = (bitmap >> 8) & 0xFF;
+                            info.supported_pids[11] = bitmap & 0xFF;
+                            pid_count += __builtin_popcount(bitmap);
+                        }
+                    }
+                }
+            }
+        }
+        
+        info.ecu_count = 1;  // TODO: detect multiple ECUs
+        info.protocol = 6;  // ISO 15765-4 CAN
+        info.dtc_count = 0; // TODO: read DTC count
+        
+        SYS_LOGI(TAG, "Scan complete: VIN=%.17s, %d PIDs supported", info.vin, pid_count);
+        
+        // Send vehicle info to Display
+        comm_link_send_vehicle_info(&info);
+        
+        // Send PID metadata for all supported data PIDs
+        #define META_BATCH_MAX  (COMM_MAX_PAYLOAD / sizeof(comm_pid_meta_t))
+        comm_pid_meta_t meta_batch[META_BATCH_MAX];
+        int meta_idx = 0;
+        int meta_total = 0;
+        
+        for (int pid = 1; pid <= MAX_SUPPORTED_PIDS; pid++) {
+            // Check bitmap (bit position = pid - 1)
+            uint8_t byte_idx = (pid - 1) / 8;
+            uint8_t bit_idx  = 7 - ((pid - 1) % 8);
+            if (!(info.supported_pids[byte_idx] & (1 << bit_idx))) {
+                continue;
+            }
+            
+            // Look up in PID database
+            const pid_entry_t *entry = pid_db_lookup(pid);
+            if (!entry) continue;
+            
+            // Only include data PIDs (formula/enum) for gauges
+            if (entry->type != PID_TYPE_FORMULA && entry->type != PID_TYPE_ENUM) {
+                continue;
+            }
+            
+            // Build metadata entry
+            memset(&meta_batch[meta_idx], 0, sizeof(comm_pid_meta_t));
+            meta_batch[meta_idx].pid_id = entry->pid;
+            meta_batch[meta_idx].unit   = (uint8_t)entry->unit;
+            strncpy(meta_batch[meta_idx].name, entry->name, PID_META_NAME_LEN - 1);
+            strncpy(meta_batch[meta_idx].unit_str, pid_db_unit_str(entry->unit), PID_META_UNIT_LEN - 1);
+            meta_idx++;
+            meta_total++;
+            
+            // Send batch when full
+            if (meta_idx >= (int)META_BATCH_MAX) {
+                comm_link_send_pid_metadata(meta_batch, meta_idx);
+                meta_idx = 0;
+            }
+        }
+        
+        // Send remaining entries
+        if (meta_idx > 0) {
+            comm_link_send_pid_metadata(meta_batch, meta_idx);
+        }
+        
+        SYS_LOGI(TAG, "Sent %d PID metadata entries to Display", meta_total);
+        
+        // Signal scan complete (Display waits for this before populating UI)
+        comm_link_send_scan_status(SCAN_STATUS_COMPLETE, info.ecu_count, (uint16_t)meta_total);
+        
+        s_scan_pending = false;
+    }
+}
+
+// ============================================================================
 // Callback: Handle config commands from Display Node
+// Runs inside the comm_link rx_task — must return quickly!
 // ============================================================================
 
 static void cmd_callback(comm_msg_type_t type, const uint8_t *payload, uint16_t len)
@@ -62,63 +189,20 @@ static void cmd_callback(comm_msg_type_t type, const uint8_t *payload, uint16_t 
         case CMD_SCAN_VEHICLE: {
             SYS_LOGI(TAG, "Vehicle scan requested by Display");
             
-            // Send scan in-progress status
-            comm_link_send_scan_status(SCAN_STATUS_IN_PROGRESS, 0, 0);
-            
-            // Build vehicle info
-            comm_vehicle_info_t info;
-            memset(&info, 0, sizeof(info));
-            
-            // Read VIN
-            esp_err_t ret = obd2_read_vin(info.vin, sizeof(info.vin));
-            if (ret != ESP_OK) {
-                SYS_LOGW(TAG, "Failed to read VIN: %s", esp_err_to_name(ret));
-                strcpy(info.vin, "UNKNOWN_VIN_12345");
+            if (s_scan_pending) {
+                SYS_LOGW(TAG, "Scan already in progress, ignoring");
+                break;
             }
             
-            // Read supported PIDs bitmaps
-            uint32_t bitmap;
-            int pid_count = 0;
-            
-            // PIDs 0x01-0x20
-            if (obd2_get_supported_pids(0x00, &bitmap) == ESP_OK) {
-                info.supported_pids[0] = (bitmap >> 24) & 0xFF;
-                info.supported_pids[1] = (bitmap >> 16) & 0xFF;
-                info.supported_pids[2] = (bitmap >> 8) & 0xFF;
-                info.supported_pids[3] = bitmap & 0xFF;
-                pid_count += __builtin_popcount(bitmap);
-                
-                // PIDs 0x21-0x40
-                if (bitmap & 0x01) {  // PID 0x20 indicates more PIDs
-                    if (obd2_get_supported_pids(0x20, &bitmap) == ESP_OK) {
-                        info.supported_pids[4] = (bitmap >> 24) & 0xFF;
-                        info.supported_pids[5] = (bitmap >> 16) & 0xFF;
-                        info.supported_pids[6] = (bitmap >> 8) & 0xFF;
-                        info.supported_pids[7] = bitmap & 0xFF;
-                        pid_count += __builtin_popcount(bitmap);
-                        
-                        // PIDs 0x41-0x60
-                        if (bitmap & 0x01) {  // PID 0x40 indicates more
-                            if (obd2_get_supported_pids(0x40, &bitmap) == ESP_OK) {
-                                info.supported_pids[8] = (bitmap >> 24) & 0xFF;
-                                info.supported_pids[9] = (bitmap >> 16) & 0xFF;
-                                info.supported_pids[10] = (bitmap >> 8) & 0xFF;
-                                info.supported_pids[11] = bitmap & 0xFF;
-                                pid_count += __builtin_popcount(bitmap);
-                            }
-                        }
-                    }
-                }
+            // Notify the scan task — don't block the rx_task with OBD2 calls
+            s_scan_pending = true;
+            if (s_scan_task_handle) {
+                xTaskNotifyGive(s_scan_task_handle);
+            } else {
+                SYS_LOGE(TAG, "Scan task not created!");
+                s_scan_pending = false;
+                comm_link_send_scan_status(SCAN_STATUS_FAILED, 0, 0);
             }
-            
-            info.ecu_count = 1;  // TODO: detect multiple ECUs
-            info.protocol = 6;  // ISO 15765-4 CAN
-            info.dtc_count = 0; // TODO: read DTC count
-            
-            SYS_LOGI(TAG, "Scan complete: VIN=%.17s, %d PIDs supported", info.vin, pid_count);
-            
-            // Send vehicle info to Display
-            comm_link_send_vehicle_info(&info);
             break;
         }
         
@@ -216,13 +300,18 @@ static esp_err_t create_tasks(void)
 {
     esp_err_t ret;
     
-    // Start CAN driver (creates ISR task)
-    ret = can_driver_start();
-    if (ret != ESP_OK) {
-        SYS_LOGE(TAG, "CAN driver start failed: %s", esp_err_to_name(ret));
-        return ret;
+    // NOTE: can_driver_start() is intentionally NOT called here.
+    // sys_mgr owns the CAN driver lifecycle and calls can_driver_start()
+    // on entry to CONNECTING_CAN state (in sys_mgr_request_state).
+
+    // Create scan task (handles OBD2 scan off the rx_task, Core 1, 8KB stack)
+    BaseType_t xret = xTaskCreatePinnedToCore(
+        scan_task, "scan", 8192, NULL, 3, &s_scan_task_handle, 1);
+    if (xret != pdPASS) {
+        SYS_LOGE(TAG, "Failed to create scan task");
+        return ESP_ERR_NO_MEM;
     }
-    
+
     // Start Comm Link (creates TX/RX/heartbeat tasks)
     ret = comm_link_start();
     if (ret != ESP_OK) {

@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 void connectCAN(lv_event_t * e);
+void pollCAN(lv_event_t * e);
 
 #ifdef __cplusplus
 } /*extern "C"*/

@@ -129,6 +129,14 @@ esp_err_t comm_link_send_vehicle_info(const comm_vehicle_info_t *info);
 esp_err_t comm_link_send_scan_status(scan_status_t status, uint16_t ecu_count, uint16_t pid_count);
 
 /**
+ * @brief Send PID metadata batch to Display Node
+ * @param entries Array of metadata entries
+ * @param count Number of entries in batch
+ * @return ESP_OK on success
+ */
+esp_err_t comm_link_send_pid_metadata(const comm_pid_meta_t *entries, uint8_t count);
+
+/**
  * @brief Register callback for received commands
  */
 esp_err_t comm_link_register_cmd_callback(comm_cmd_callback_t callback);

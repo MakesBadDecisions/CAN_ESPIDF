@@ -363,12 +363,17 @@ static void mcp2515_isr_task(void *arg)
             uint8_t eflg = mcp2515_read_register(MCP2515_EFLG);
             s_driver.stats.tec = mcp2515_read_register(MCP2515_TEC);
             s_driver.stats.rec = mcp2515_read_register(MCP2515_REC);
-            
+
+            ESP_LOGW(TAG, "Error interrupt: EFLG=0x%02X TEC=%u REC=%u",
+                     eflg, s_driver.stats.tec, s_driver.stats.rec);
+
             if (eflg & EFLG_TXBO) {
                 s_driver.state = CAN_STATE_BUS_OFF;
-                ESP_LOGE(TAG, "Bus-off condition detected");
+                ESP_LOGE(TAG, "Bus-off detected (TEC=%u) - call clear_errors to recover",
+                         s_driver.stats.tec);
             } else if (eflg & (EFLG_TXEP | EFLG_RXEP)) {
                 s_driver.state = CAN_STATE_ERROR_PASSIVE;
+                ESP_LOGW(TAG, "Error-passive state");
             } else if (eflg & EFLG_EWARN) {
                 s_driver.state = CAN_STATE_ERROR_WARNING;
             }
@@ -623,7 +628,19 @@ esp_err_t mcp2515_stop(void)
 
 esp_err_t mcp2515_send(const can_frame_t *frame, uint32_t timeout_ms)
 {
-    if (!s_driver.initialized || s_driver.state != CAN_STATE_RUNNING) {
+    if (!s_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // BUS_OFF requires explicit recovery. ERROR_WARNING and ERROR_PASSIVE
+    // are transient error states — allow TX so OBD2 retries can succeed.
+    if (s_driver.state == CAN_STATE_BUS_OFF) {
+        ESP_LOGW(TAG, "TX blocked: bus-off state");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_driver.state == CAN_STATE_STOPPED) {
+        ESP_LOGW(TAG, "TX blocked: driver not started");
         return ESP_ERR_INVALID_STATE;
     }
     
@@ -711,12 +728,58 @@ can_state_t mcp2515_get_state(void)
     return s_driver.state;
 }
 
+esp_err_t mcp2515_abort_all_tx(void)
+{
+    if (!s_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Set ABAT bit - MCP2515 will abort all pending TX and clear TXREQ bits
+    mcp2515_bit_modify(MCP2515_CANCTRL, CANCTRL_ABAT, CANCTRL_ABAT);
+
+    // Wait up to 5ms for all TXREQ bits to clear
+    for (int i = 0; i < 50; i++) {
+        uint8_t status = mcp2515_read_status();
+        if (!(status & (0x04 | 0x10 | 0x40))) {
+            break;  // TXB0TXREQ | TXB1TXREQ | TXB2TXREQ all clear
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // Clear ABAT bit
+    mcp2515_bit_modify(MCP2515_CANCTRL, CANCTRL_ABAT, 0x00);
+
+    // Clear TX interrupt flags
+    mcp2515_bit_modify(MCP2515_CANINTF, CANINT_TX0I | CANINT_TX1I | CANINT_TX2I, 0);
+
+    ESP_LOGD(TAG, "TX buffers aborted");
+    return ESP_OK;
+}
+
 esp_err_t mcp2515_clear_errors(void)
 {
     if (!s_driver.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
+
+    // Bus-off requires explicit recovery: abort TX, cycle through config mode
+    if (s_driver.state == CAN_STATE_BUS_OFF) {
+        ESP_LOGW(TAG, "Bus-off recovery: cycling config mode...");
+        mcp2515_abort_all_tx();
+        esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_CONFIG);
+        if (ret == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
+        }
+        if (ret == ESP_OK) {
+            s_driver.state = CAN_STATE_RUNNING;
+            ESP_LOGI(TAG, "Bus-off recovery complete");
+        } else {
+            ESP_LOGE(TAG, "Bus-off recovery failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
     // Clear error flags
     mcp2515_bit_modify(MCP2515_EFLG, 0xFF, 0x00);
     mcp2515_bit_modify(MCP2515_CANINTF, CANINT_ERRI | CANINT_MERR, 0);
@@ -726,7 +789,7 @@ esp_err_t mcp2515_clear_errors(void)
     s_driver.stats.rx_errors = 0;
     s_driver.stats.rx_overflows = 0;
     
-    // If we were in error state, try to return to running
+    // If we were in a transient error state, return to running
     if (s_driver.state == CAN_STATE_ERROR_WARNING ||
         s_driver.state == CAN_STATE_ERROR_PASSIVE) {
         s_driver.state = CAN_STATE_RUNNING;

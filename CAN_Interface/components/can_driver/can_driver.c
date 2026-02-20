@@ -234,6 +234,20 @@ esp_err_t can_driver_get_status(can_status_t *status)
     }
 }
 
+esp_err_t can_driver_abort_tx(void)
+{
+    if (!s_can_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    switch (s_can_driver.backend) {
+        case CAN_BACKEND_MCP2515:
+            return mcp2515_abort_all_tx();
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
 esp_err_t can_driver_clear_errors(void)
 {
     if (!s_can_driver.initialized) {

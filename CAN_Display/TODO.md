@@ -44,14 +44,15 @@ The primary user interaction flow:
 - [x] Add gauge value label (`ui_gaugeText1`)
 - [x] Add `connectCAN` event handler stub
 - [x] Configure lv_conf.h for ESP32-S3 with PSRAM framebuffer
-- [ ] Implement `connectCAN()` -- trigger vehicle scan via comm_link
-- [ ] Populate PID dropdown from supported PIDs list
+- [x] Implement `connectCAN()` -- trigger vehicle scan via comm_link
+- [x] Populate PID dropdown from PID metadata received from CAN Interface
 - [ ] Populate unit dropdown based on selected PID
 - [ ] Handle PID selection change -- bind gauge to PID
 - [ ] Handle unit selection change -- convert and display in selected unit
-- [ ] Update `ui_gaugeText1` from comm_link PID store (periodic refresh)
+- [x] Implement `pollCAN()` -- start/stop toggle, poll selected PID at 10Hz, update gauge via lv_timer
+- [x] Update `ui_gaugeText1` from comm_link PID store (periodic refresh)
 - [ ] Add status label for connection state (DISCONNECTED/CONNECTING/CONNECTED)
-- [ ] Add VIN display area for vehicle identification
+- [x] Add VIN display area for vehicle identification (ui_vehicleInfoLabel1)
 - [ ] Add multi-gauge layout screen with 2-6 configurable gauges
 
 ## system/
@@ -74,14 +75,18 @@ The primary user interaction flow:
 - [x] Message dispatcher -- route parsed messages by type using shared/comm_protocol definitions
 - [x] PID data store -- fixed-size array (64 entries), holds latest value + timestamp
 - [x] PID data store -- mutex protection for cross-core access
+- [x] PID metadata store -- RAM-only array (96 entries) of pid/name/unit from CAN Interface
+- [x] Handle MSG_PID_METADATA -- store PID names and unit strings received during scan
+- [x] Fix bitmap off-by-one -- PID 1-based indexing in is_pid_supported and get_supported_pids
 - [x] Heartbeat send -- TX heartbeat every 500ms
 - [x] Heartbeat monitor -- track last RX timestamp, set disconnected flag after 2s timeout
 - [x] Connection status API -- `comm_link_get_state()`, `comm_link_get_stats()`
 - [x] TX path -- send frames to CAN Interface Node over UART
+- [x] Metadata API -- get_pid_name, get_pid_unit_str, get_meta_pid_id, get_pid_meta_count
 - [ ] PID data store -- stale detection (mark entries not updated within timeout)
-- [ ] Send vehicle scan request -- MSG_CONFIG_CMD to trigger ECU/VIN/PID scan
-- [ ] Handle scan response -- MSG_SCAN_STATUS with ECU IDs, VIN, supported PIDs
-- [ ] Send poll list update -- MSG_CONFIG_CMD with selected PID list
+- [x] Send vehicle scan request -- MSG_CONFIG_CMD to trigger ECU/VIN/PID scan
+- [x] Handle scan response -- MSG_SCAN_STATUS with ECU IDs, VIN, supported PIDs + PID metadata
+- [x] Send poll list update -- MSG_CONFIG_CMD with selected PID list
 - [ ] Store vehicle info -- save VIN/ECU to NVS on successful scan
 - [ ] Load vehicle info -- recall saved VIN/ECU from NVS on boot
 - [ ] Callback registration -- notify UI when new PID data arrives

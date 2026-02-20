@@ -13,5 +13,6 @@ idf_component_register(
     REQUIRES 
         lvgl
         comm_link
+        display_driver
         log
 )

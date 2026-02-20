@@ -22,6 +22,9 @@ extern lv_obj_t * ui_piddropdown1;
 extern lv_obj_t * ui_unnitdropdown2;
 extern lv_obj_t * ui_gaugeText1;
 extern lv_obj_t * ui_vehicleInfoLabel1;
+extern void ui_event_pollCAN1(lv_event_t * e);
+extern lv_obj_t * ui_pollCAN1;
+extern lv_obj_t * ui_Label2;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

@@ -22,6 +22,7 @@
 #define COMM_LINK_TX_QUEUE_LEN  16
 #define COMM_LINK_RX_BUFFER     2048
 #define COMM_LINK_PID_STORE_MAX 64          // Max cached PID values
+#define PID_META_STORE_MAX      96          // Max PID metadata entries (RAM only)
 
 // ============================================================================
 // Link State
@@ -44,6 +45,18 @@ typedef struct {
     uint32_t    timestamp;      // When received (local tick)
     bool        valid;          // Entry in use
 } pid_value_t;
+
+// ============================================================================
+// PID Metadata (RAM cache from scan, not persisted to flash)
+// ============================================================================
+
+typedef struct {
+    uint16_t    pid_id;                         // PID number
+    uint8_t     unit;                           // pid_unit_t enum value (base unit)
+    char        name[PID_META_NAME_LEN];        // Human-readable name
+    char        unit_str[PID_META_UNIT_LEN];    // Unit display string
+    bool        valid;                          // Entry in use
+} pid_meta_entry_t;
 
 // ============================================================================
 // Statistics
@@ -187,3 +200,40 @@ esp_err_t comm_link_set_poll_list(const uint16_t *pids, uint8_t count, uint8_t r
  * @brief Stop polling (clear poll list)
  */
 esp_err_t comm_link_clear_poll_list(void);
+
+// ============================================================================
+// PID Metadata API (populated from scan, stored in RAM)
+// ============================================================================
+
+/**
+ * @brief Get PID name from metadata store
+ * @param pid_id PID number
+ * @return Name string or NULL if not found
+ */
+const char *comm_link_get_pid_name(uint16_t pid_id);
+
+/**
+ * @brief Get PID unit display string from metadata store
+ * @param pid_id PID number
+ * @return Unit string or NULL if not found
+ */
+const char *comm_link_get_pid_unit_str(uint16_t pid_id);
+
+/**
+ * @brief Get PID base unit enum from metadata store
+ * @param pid_id PID number
+ * @return pid_unit_t value, or PID_UNIT_NONE if not found
+ */
+pid_unit_t comm_link_get_pid_unit(uint16_t pid_id);
+
+/**
+ * @brief Get PID number by metadata index (for dropdown mapping)
+ * @param index Index into valid metadata entries (0-based)
+ * @return PID number or 0xFFFF if index out of range
+ */
+uint16_t comm_link_get_meta_pid_id(int index);
+
+/**
+ * @brief Get count of valid PID metadata entries
+ */
+int comm_link_get_pid_meta_count(void);

@@ -63,9 +63,16 @@ static void monitor_task_func(void *arg)
         // Check heap
         uint32_t free_heap = sys_get_free_heap();
         uint32_t min_heap = sys_get_min_free_heap();
-        
+
         if (min_heap < s_mgr.stats.heap_min_free || s_mgr.stats.heap_min_free == 0) {
             s_mgr.stats.heap_min_free = min_heap;
+        }
+
+        // Sync CAN frame counters from driver (avoids circular dep - driver doesn't know about sys_mgr)
+        can_status_t can_status;
+        if (can_driver_get_status(&can_status) == ESP_OK) {
+            s_mgr.stats.can_frames_rx = can_status.stats.rx_frames;
+            s_mgr.stats.can_frames_tx = can_status.stats.tx_frames;
         }
         
         if (free_heap < HEAP_WARN_THRESHOLD) {
@@ -89,7 +96,7 @@ static void monitor_task_func(void *arg)
         
         // Periodic status log (every 10 seconds)
         if (s_mgr.stats.uptime_sec % 10 == 0) {
-            SYS_LOGI(TAG, "[%s] up=%lus heap=%lu/%lu rx=%lu tx=%lu err=%lu",
+            SYS_LOGD(TAG, "[%s] up=%lus heap=%lu/%lu rx=%lu tx=%lu err=%lu",
                      sys_mgr_state_name(s_mgr.state),
                      (unsigned long)s_mgr.stats.uptime_sec,
                      (unsigned long)free_heap,

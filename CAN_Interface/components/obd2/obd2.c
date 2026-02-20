@@ -420,12 +420,19 @@ retry:
     s_obd2.pending_response = NULL;
     
     if (got_response != pdTRUE) {
-        // Timeout
+        // Abort any TX buffers stuck waiting for an ACK that never came.
+        // Must happen before retry so the next CAN send has a free buffer.
+        can_driver_abort_tx();
+
         if (retries > 0) {
             retries--;
             SYS_LOGW(TAG, "Timeout, retrying (%d left)", retries);
             goto retry;
         }
+
+        // All retries exhausted - clear error state (bus-off recovery if needed)
+        // so subsequent requests from other callers are not blocked.
+        can_driver_clear_errors();
         SYS_LOGW(TAG, "No response for Mode 0x%02X PID 0x%04X",
                  request->mode, request->pid);
         return ESP_OK;  // Return OK, caller checks response->status

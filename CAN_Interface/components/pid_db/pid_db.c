@@ -20,6 +20,15 @@ int pid_db_init(void)
     return 0;  // ESP_OK
 }
 
+// ============================================================================
+// Unit Enum to Display String (delegates to shared pid_types)
+// ============================================================================
+
+const char *pid_db_unit_str(unit_t unit)
+{
+    return pid_unit_str(unit);
+}
+
 const pid_entry_t *pid_db_lookup(uint16_t pid)
 {
     // Search OBD-II table first

@@ -5,5 +5,5 @@ idf_component_register(
         "pid_db.c"
         "pid_tables.c"
     INCLUDE_DIRS "."
-    REQUIRES system
+    REQUIRES system pid_types
 )

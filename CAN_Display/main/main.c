@@ -94,7 +94,7 @@ void app_main(void)
         // Log link status
         const comm_link_stats_t *stats = comm_link_get_stats();
         comm_link_state_t state = comm_link_get_state();
-        SYS_LOGI("Link: %s | rx=%lu tx=%lu pids=%lu err=%lu",
+        SYS_LOGD("Link: %s | rx=%lu tx=%lu pids=%lu err=%lu",
                  state == COMM_LINK_CONNECTED ? "CONNECTED" : "DISCONNECTED",
                  (unsigned long)stats->rx_frames,
                  (unsigned long)stats->tx_frames,

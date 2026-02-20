@@ -85,6 +85,7 @@ typedef enum {
     MSG_PID_DATA_BATCH  = 0x02,
     MSG_VEHICLE_INFO    = 0x03,
     MSG_DTC_LIST        = 0x04,
+    MSG_PID_METADATA    = 0x05,
     MSG_HEARTBEAT       = 0x10,
     MSG_CONFIG_CMD      = 0x20,
     MSG_CONFIG_RESP     = 0x21,
@@ -180,6 +181,36 @@ typedef struct __attribute__((packed)) {
 With UART transport there is no 250-byte frame limit, so large DTC lists
 can be sent in fewer frames than a wireless design would require. The
 `more_available` field is retained for flexibility.
+
+---
+
+### PID_METADATA (0x05)
+
+Batch of PID descriptors sent from the CAN Interface to the Display after a
+vehicle scan. Each entry carries the PID number, human-readable name, and
+base unit string. The Display stores these **in RAM only** (not flash) and
+uses them to populate the PID dropdown and label gauge readings.
+
+```c
+typedef struct __attribute__((packed)) {
+    uint16_t pid_id;                        // PID number
+    char     name[PID_META_NAME_LEN];       // Human-readable name (32 chars)
+    char     unit_str[PID_META_UNIT_LEN];   // Unit display string (8 chars)
+} comm_pid_meta_t;
+```
+
+**Size per entry:** 42 bytes. Up to 24 entries per frame (at 1024-byte max
+payload). Multiple `PID_METADATA` frames are sent in sequence to cover all
+supported data PIDs. Only `FORMULA` and `ENUM` type PIDs are included;
+bitmap, status, and string PIDs are filtered out.
+
+**Scan flow:**
+1. Interface sends `SCAN_STATUS` IN_PROGRESS (Display clears metadata store)
+2. Interface sends `VEHICLE_INFO` (VIN, ECU count, supported PID bitmap)
+3. Interface sends one or more `PID_METADATA` batches
+4. Interface sends `SCAN_STATUS` COMPLETE (Display fires scan callback)
+
+On restart, the Display discards all metadata and re-scans to get fresh data.
 
 ---
 

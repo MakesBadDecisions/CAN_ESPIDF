@@ -73,6 +73,10 @@ static struct {
     scan_status_t       scan_status;
     SemaphoreHandle_t   vehicle_mutex;
     
+    // PID metadata store (RAM only, repopulated each scan)
+    pid_meta_entry_t    pid_meta[PID_META_STORE_MAX];
+    int                 pid_meta_count;
+    
     // Callbacks
     comm_pid_callback_t pid_callback;
     comm_scan_callback_t scan_callback;
@@ -95,6 +99,48 @@ static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
         }
     }
     return crc;
+}
+
+// ============================================================================
+// PID Metadata Store (RAM only)
+// ============================================================================
+
+static void clear_pid_meta(void)
+{
+    memset(s_ctx.pid_meta, 0, sizeof(s_ctx.pid_meta));
+    s_ctx.pid_meta_count = 0;
+}
+
+static void store_pid_meta(const comm_pid_meta_t *meta)
+{
+    // Check for existing entry (update)
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (s_ctx.pid_meta[i].valid && s_ctx.pid_meta[i].pid_id == meta->pid_id) {
+            s_ctx.pid_meta[i].unit = meta->unit;
+            strncpy(s_ctx.pid_meta[i].name, meta->name, PID_META_NAME_LEN - 1);
+            s_ctx.pid_meta[i].name[PID_META_NAME_LEN - 1] = '\0';
+            strncpy(s_ctx.pid_meta[i].unit_str, meta->unit_str, PID_META_UNIT_LEN - 1);
+            s_ctx.pid_meta[i].unit_str[PID_META_UNIT_LEN - 1] = '\0';
+            return;
+        }
+    }
+    
+    // Find empty slot
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (!s_ctx.pid_meta[i].valid) {
+            s_ctx.pid_meta[i].pid_id = meta->pid_id;
+            s_ctx.pid_meta[i].unit = meta->unit;
+            strncpy(s_ctx.pid_meta[i].name, meta->name, PID_META_NAME_LEN - 1);
+            s_ctx.pid_meta[i].name[PID_META_NAME_LEN - 1] = '\0';
+            strncpy(s_ctx.pid_meta[i].unit_str, meta->unit_str, PID_META_UNIT_LEN - 1);
+            s_ctx.pid_meta[i].unit_str[PID_META_UNIT_LEN - 1] = '\0';
+            s_ctx.pid_meta[i].valid = true;
+            s_ctx.pid_meta_count++;
+            return;
+        }
+    }
+    
+    ESP_LOGW(TAG, "PID metadata store full, dropping PID 0x%04X", meta->pid_id);
 }
 
 // ============================================================================
@@ -260,21 +306,11 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
                 if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     memcpy(&s_ctx.vehicle_info, payload, sizeof(comm_vehicle_info_t));
                     s_ctx.vehicle_info_valid = true;
-                    s_ctx.scan_status = SCAN_STATUS_COMPLETE;
                     xSemaphoreGive(s_ctx.vehicle_mutex);
                     
-                    ESP_LOGI(TAG, "Vehicle info: VIN=%.17s, %u ECUs, %u PIDs supported",
+                    ESP_LOGI(TAG, "Vehicle info: VIN=%.17s, %u ECUs",
                              s_ctx.vehicle_info.vin,
-                             s_ctx.vehicle_info.ecu_count,
-                             __builtin_popcount(*(uint32_t*)&s_ctx.vehicle_info.supported_pids[0]) +
-                             __builtin_popcount(*(uint32_t*)&s_ctx.vehicle_info.supported_pids[4]) +
-                             __builtin_popcount(*(uint32_t*)&s_ctx.vehicle_info.supported_pids[8]));
-                    
-                    // Notify callback
-                    if (s_ctx.scan_callback) {
-                        s_ctx.scan_callback(SCAN_STATUS_COMPLETE, &s_ctx.vehicle_info);
-                        s_ctx.scan_callback = NULL;  // One-shot callback
-                    }
+                             s_ctx.vehicle_info.ecu_count);
                 }
             }
             break;
@@ -282,6 +318,18 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
         case MSG_DTC_LIST:
             // TODO: Store DTC list
             ESP_LOGI(TAG, "DTC list received");
+            break;
+            
+        case MSG_PID_METADATA:
+            if (payload && header.payload_len >= sizeof(comm_pid_meta_t)) {
+                size_t count = header.payload_len / sizeof(comm_pid_meta_t);
+                const comm_pid_meta_t *metas = (const comm_pid_meta_t *)payload;
+                for (size_t i = 0; i < count; i++) {
+                    store_pid_meta(&metas[i]);
+                }
+                ESP_LOGI(TAG, "PID metadata: %u entries received (total: %d)",
+                         (unsigned)count, s_ctx.pid_meta_count);
+            }
             break;
             
         case MSG_SCAN_STATUS:
@@ -292,7 +340,22 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
                 ESP_LOGI(TAG, "Scan status: %d, %u ECUs, %u PIDs",
                          status->status, status->ecu_count, status->pid_count);
                 
-                // If scan failed, notify callback
+                // Clear metadata store when scan starts
+                if (status->status == SCAN_STATUS_IN_PROGRESS) {
+                    clear_pid_meta();
+                }
+                
+                // Scan complete: all metadata received, fire callback
+                if (status->status == SCAN_STATUS_COMPLETE) {
+                    s_ctx.scan_status = SCAN_STATUS_COMPLETE;
+                    if (s_ctx.scan_callback) {
+                        s_ctx.scan_callback(SCAN_STATUS_COMPLETE,
+                                            s_ctx.vehicle_info_valid ? &s_ctx.vehicle_info : NULL);
+                        s_ctx.scan_callback = NULL;
+                    }
+                }
+                
+                // Scan failed
                 if (status->status == SCAN_STATUS_FAILED || 
                     status->status == SCAN_STATUS_NO_RESPONSE) {
                     if (s_ctx.scan_callback) {
@@ -358,8 +421,13 @@ static void rx_task_func(void *arg)
                     expected_len = COMM_HEADER_SIZE + hdr->payload_len + COMM_CRC_SIZE;
                     
                     if (expected_len > RX_BUF_SIZE) {
-                        ESP_LOGW(TAG, "Frame too large: %u", expected_len);
-                        s_ctx.stats.rx_overflows++;
+                        ESP_LOGW(TAG, "Framing error: payload_len=%u (type=0x%02X seq=%u) - "
+                                 "flushing RX buffer",
+                                 hdr->payload_len, hdr->msg_type, hdr->sequence);
+                        // Flush the UART RX buffer so we re-sync on the next real start byte
+                        // rather than processing the remaining bytes of the corrupted frame.
+                        uart_flush_input(UART_NUM);
+                        s_ctx.stats.rx_errors++;
                         rx_state = STATE_IDLE;
                     } else {
                         rx_state = STATE_PAYLOAD_CRC;
@@ -694,15 +762,15 @@ bool comm_link_get_vehicle_info(comm_vehicle_info_t *out_info)
 
 bool comm_link_is_pid_supported(uint16_t pid_id)
 {
-    if (pid_id >= MAX_SUPPORTED_PIDS) {
+    if (pid_id == 0 || pid_id > MAX_SUPPORTED_PIDS) {
         return false;
     }
     
     bool supported = false;
     if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (s_ctx.vehicle_info_valid) {
-            uint8_t byte_idx = pid_id / 8;
-            uint8_t bit_idx = 7 - (pid_id % 8);  // MSB first
+            uint8_t byte_idx = (pid_id - 1) / 8;
+            uint8_t bit_idx = 7 - ((pid_id - 1) % 8);
             supported = (s_ctx.vehicle_info.supported_pids[byte_idx] & (1 << bit_idx)) != 0;
         }
         xSemaphoreGive(s_ctx.vehicle_mutex);
@@ -720,11 +788,11 @@ int comm_link_get_supported_pids(uint16_t *out_pids, int max_count)
     int count = 0;
     if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (s_ctx.vehicle_info_valid) {
-            for (int pid = 0; pid < MAX_SUPPORTED_PIDS && count < max_count; pid++) {
-                uint8_t byte_idx = pid / 8;
-                uint8_t bit_idx = 7 - (pid % 8);
+            for (int pos = 0; pos < MAX_SUPPORTED_PIDS && count < max_count; pos++) {
+                uint8_t byte_idx = pos / 8;
+                uint8_t bit_idx = 7 - (pos % 8);
                 if (s_ctx.vehicle_info.supported_pids[byte_idx] & (1 << bit_idx)) {
-                    out_pids[count++] = pid;
+                    out_pids[count++] = pos + 1;  // Bitmap pos 0 = PID 1
                 }
             }
         }
@@ -779,4 +847,57 @@ esp_err_t comm_link_clear_poll_list(void)
     
     ESP_LOGI(TAG, "Clearing poll list");
     return send_frame(MSG_CONFIG_CMD, cmd_buf, sizeof(comm_config_cmd_t));
+}
+
+// ============================================================================
+// PID Metadata API (RAM store populated from scan)
+// ============================================================================
+
+const char *comm_link_get_pid_name(uint16_t pid_id)
+{
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (s_ctx.pid_meta[i].valid && s_ctx.pid_meta[i].pid_id == pid_id) {
+            return s_ctx.pid_meta[i].name;
+        }
+    }
+    return NULL;
+}
+
+const char *comm_link_get_pid_unit_str(uint16_t pid_id)
+{
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (s_ctx.pid_meta[i].valid && s_ctx.pid_meta[i].pid_id == pid_id) {
+            return s_ctx.pid_meta[i].unit_str;
+        }
+    }
+    return NULL;
+}
+
+pid_unit_t comm_link_get_pid_unit(uint16_t pid_id)
+{
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (s_ctx.pid_meta[i].valid && s_ctx.pid_meta[i].pid_id == pid_id) {
+            return (pid_unit_t)s_ctx.pid_meta[i].unit;
+        }
+    }
+    return PID_UNIT_NONE;
+}
+
+uint16_t comm_link_get_meta_pid_id(int index)
+{
+    int count = 0;
+    for (int i = 0; i < PID_META_STORE_MAX; i++) {
+        if (s_ctx.pid_meta[i].valid) {
+            if (count == index) {
+                return s_ctx.pid_meta[i].pid_id;
+            }
+            count++;
+        }
+    }
+    return 0xFFFF;
+}
+
+int comm_link_get_pid_meta_count(void)
+{
+    return s_ctx.pid_meta_count;
 }

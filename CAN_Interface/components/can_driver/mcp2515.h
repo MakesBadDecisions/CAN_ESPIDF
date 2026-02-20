@@ -122,6 +122,13 @@ esp_err_t mcp2515_get_stats(can_stats_t *stats);
 can_state_t mcp2515_get_state(void);
 
 /**
+ * @brief Abort all pending TX buffer transmissions
+ * Use after request timeout to free TX buffers for the next request.
+ * @return ESP_OK on success
+ */
+esp_err_t mcp2515_abort_all_tx(void);
+
+/**
  * @brief Clear error counters and flags
  * @return ESP_OK on success
  */

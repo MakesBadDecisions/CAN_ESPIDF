@@ -5,107 +5,266 @@
 
 #include "ui.h"
 #include "comm_link.h"
+#include "display_driver.h"
+#include "pid_types.h"
 #include "esp_log.h"
 #include "screens/ui_Screen1.h"
 #include <stdio.h>
 
 static const char *TAG = "ui_events";
 
-// PID name lookup (subset for testing)
-static const char* get_pid_name(uint16_t pid) {
-    switch (pid) {
-        case 0x04: return "Engine Load";
-        case 0x05: return "Coolant Temp";
-        case 0x06: return "Short Fuel Trim B1";
-        case 0x07: return "Long Fuel Trim B1";
-        case 0x0B: return "Intake MAP";
-        case 0x0C: return "Engine RPM";
-        case 0x0D: return "Vehicle Speed";
-        case 0x0E: return "Timing Advance";
-        case 0x0F: return "Intake Air Temp";
-        case 0x10: return "MAF Rate";
-        case 0x11: return "Throttle Pos";
-        case 0x1F: return "Run Time";
-        case 0x21: return "Distance w/ MIL";
-        case 0x2F: return "Fuel Level";
-        case 0x31: return "Distance since CLR";
-        case 0x33: return "Barometric";
-        case 0x42: return "Control Module V";
-        case 0x46: return "Ambient Air Temp";
-        case 0x5C: return "Oil Temp";
-        default:   return "Unknown PID";
+// Polling state
+static bool       s_polling = false;
+static lv_timer_t *s_gauge_timer = NULL;
+static uint16_t   s_poll_pid = 0;
+static pid_unit_t s_display_unit = PID_UNIT_NONE;  // current display unit
+static pid_unit_t s_base_unit    = PID_UNIT_NONE;  // PID's native unit
+
+// Scan timeout (10 seconds)
+#define SCAN_TIMEOUT_MS  10000
+static lv_timer_t *s_scan_timer = NULL;
+
+// ============================================================================
+// Scan Timeout Timer (runs inside LVGL task)
+// ============================================================================
+
+static void scan_timeout_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    s_scan_timer = NULL;
+    
+    if (comm_link_get_scan_status() != SCAN_STATUS_COMPLETE) {
+        ESP_LOGW(TAG, "Scan timed out after %d ms", SCAN_TIMEOUT_MS);
+        lv_label_set_text(ui_Label1, "Connect");
+        lv_label_set_text(ui_vehicleInfoLabel1, "Scan timeout");
     }
 }
 
-// Callback when scan completes
+// Forward declarations
+void unitChanged(lv_event_t *e);
+
+// ============================================================================
+// Gauge Update Timer (runs inside LVGL task, lock already held)
+// ============================================================================
+
+static void gauge_update_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    pid_value_t val;
+    if (comm_link_get_pid(s_poll_pid, &val)) {
+        float display_val = val.value;
+        // Convert to display unit if different from base
+        if (s_display_unit != s_base_unit) {
+            pid_unit_convert(val.value, s_base_unit, s_display_unit, &display_val);
+        }
+        static char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f", display_val);
+        lv_label_set_text(ui_gaugeText1, buf);
+    }
+}
+
+// ============================================================================
+// Populate Unit Dropdown for a PID
+// ============================================================================
+
+static void populate_unit_dropdown(uint16_t pid_id)
+{
+    pid_unit_t base = comm_link_get_pid_unit(pid_id);
+    s_base_unit = base;
+    s_display_unit = base;
+
+    // Start with the base unit
+    static char opts[128];
+    int pos = 0;
+    const char *base_str = pid_unit_str(base);
+    pos += snprintf(opts + pos, sizeof(opts) - pos, "%s", 
+                    (base_str && base_str[0]) ? base_str : "raw");
+
+    // Add convertible alternatives
+    pid_unit_t alts[4];
+    int alt_count = pid_unit_get_alts(base, alts, 4);
+    for (int i = 0; i < alt_count; i++) {
+        const char *alt_str = pid_unit_str(alts[i]);
+        if (alt_str && alt_str[0]) {
+            pos += snprintf(opts + pos, sizeof(opts) - pos, "\n%s", alt_str);
+        }
+    }
+
+    lv_dropdown_set_options(ui_unnitdropdown2, opts);
+    lv_dropdown_set_selected(ui_unnitdropdown2, 0);
+
+    // Wire up unit change event (once)
+    static bool s_unit_event_registered = false;
+    if (!s_unit_event_registered) {
+        lv_obj_add_event_cb(ui_unnitdropdown2, unitChanged, LV_EVENT_VALUE_CHANGED, NULL);
+        s_unit_event_registered = true;
+    }
+}
+
+// ============================================================================
+// Scan Complete Callback (called from rx_task, must lock LVGL)
+// ============================================================================
+
 static void on_scan_complete(scan_status_t status, const comm_vehicle_info_t *info)
 {
+    if (!display_lock(200)) {
+        ESP_LOGW(TAG, "Could not acquire display lock for scan callback");
+        return;
+    }
+
+    // Cancel scan timeout timer
+    if (s_scan_timer) {
+        lv_timer_del(s_scan_timer);
+        s_scan_timer = NULL;
+    }
+
     if (status == SCAN_STATUS_COMPLETE && info) {
         ESP_LOGI(TAG, "Scan complete! VIN: %.17s", info->vin);
-        
+
+        // Show VIN
+        static char vin_text[32];
+        snprintf(vin_text, sizeof(vin_text), "VIN: %.17s", info->vin);
+        lv_label_set_text(ui_vehicleInfoLabel1, vin_text);
+
         // Update button text
-        lv_label_set_text(ui_Label1, "Start");
-        
-        // Populate PID dropdown with supported PIDs
-        uint16_t pids[MAX_SUPPORTED_PIDS];
-        int count = comm_link_get_supported_pids(pids, MAX_SUPPORTED_PIDS);
-        
-        if (count > 0) {
-            // Build dropdown options string
-            static char dropdown_opts[1024];
+        lv_label_set_text(ui_Label1, "Scan");
+
+        // Populate PID dropdown from metadata store
+        int meta_count = comm_link_get_pid_meta_count();
+        if (meta_count > 0) {
+            static char dropdown_opts[2048];
             int pos = 0;
-            for (int i = 0; i < count && pos < (int)sizeof(dropdown_opts) - 32; i++) {
-                pos += snprintf(dropdown_opts + pos, sizeof(dropdown_opts) - pos,
-                               "0x%02X %s\n", pids[i], get_pid_name(pids[i]));
+            for (int i = 0; i < meta_count && pos < (int)sizeof(dropdown_opts) - 64; i++) {
+                uint16_t pid_id = comm_link_get_meta_pid_id(i);
+                const char *name = comm_link_get_pid_name(pid_id);
+                if (pid_id != 0xFFFF && name) {
+                    pos += snprintf(dropdown_opts + pos, sizeof(dropdown_opts) - pos,
+                                   "0x%02X %s\n", pid_id, name);
+                }
             }
-            if (pos > 0) dropdown_opts[pos - 1] = '\0';  // Remove trailing newline
-            
+            if (pos > 0) dropdown_opts[pos - 1] = '\0';
+
             lv_dropdown_set_options(ui_piddropdown1, dropdown_opts);
-            ESP_LOGI(TAG, "Populated dropdown with %d PIDs", count);
+            ESP_LOGI(TAG, "Populated dropdown with %d PIDs", meta_count);
         }
     } else {
         ESP_LOGW(TAG, "Scan failed with status %d", status);
         lv_label_set_text(ui_Label1, "Connect");
     }
+
+    display_unlock();
 }
+
+// ============================================================================
+// Connect Button - Scan Vehicle
+// ============================================================================
 
 void connectCAN(lv_event_t * e)
 {
-    (void)e;  // Unused
-    
-    scan_status_t status = comm_link_get_scan_status();
-    
-    if (status == SCAN_STATUS_IN_PROGRESS) {
+    (void)e;
+
+    if (comm_link_get_scan_status() == SCAN_STATUS_IN_PROGRESS) {
         ESP_LOGI(TAG, "Scan already in progress...");
         return;
     }
-    
-    // Check if we already have vehicle info
-    comm_vehicle_info_t info;
-    if (comm_link_get_vehicle_info(&info)) {
-        // Already scanned - start polling selected PID
-        uint16_t selected_idx = lv_dropdown_get_selected(ui_piddropdown1);
-        uint16_t pids[MAX_SUPPORTED_PIDS];
-        int count = comm_link_get_supported_pids(pids, MAX_SUPPORTED_PIDS);
-        
-        if (selected_idx < count) {
-            uint16_t selected_pid = pids[selected_idx];
-            ESP_LOGI(TAG, "Starting poll for PID 0x%02X", selected_pid);
-            
-            // Send poll list with single PID
-            comm_link_set_poll_list(&selected_pid, 1, 10);  // 10 Hz
-            
-            lv_label_set_text(ui_Label1, "Polling...");
+
+    ESP_LOGI(TAG, "Requesting vehicle scan...");
+    lv_label_set_text(ui_Label1, "Scanning...");
+
+    // Start scan timeout timer (one-shot)
+    if (s_scan_timer) {
+        lv_timer_del(s_scan_timer);
+    }
+    s_scan_timer = lv_timer_create(scan_timeout_cb, SCAN_TIMEOUT_MS, NULL);
+    lv_timer_set_repeat_count(s_scan_timer, 1);
+
+    esp_err_t err = comm_link_request_scan(on_scan_complete);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to request scan: %s", esp_err_to_name(err));
+        lv_label_set_text(ui_Label1, "Connect");
+    }
+}
+
+// ============================================================================
+// Poll Button - Start/Stop Polling Selected PID
+// ============================================================================
+
+void pollCAN(lv_event_t * e)
+{
+    (void)e;
+
+    if (s_polling) {
+        // Stop polling
+        comm_link_clear_poll_list();
+        lv_label_set_text(ui_Label2, "Poll");
+        lv_label_set_text(ui_gaugeText1, "---");
+        if (s_gauge_timer) {
+            lv_timer_del(s_gauge_timer);
+            s_gauge_timer = NULL;
         }
+        s_polling = false;
+        ESP_LOGI(TAG, "Polling stopped");
+        return;
+    }
+
+    // Must scan first
+    int meta_count = comm_link_get_pid_meta_count();
+    if (meta_count == 0) {
+        ESP_LOGW(TAG, "No PID metadata - scan vehicle first");
+        return;
+    }
+
+    // Get selected PID from dropdown
+    uint16_t selected_idx = lv_dropdown_get_selected(ui_piddropdown1);
+    uint16_t pid_id = comm_link_get_meta_pid_id(selected_idx);
+    if (pid_id == 0xFFFF) {
+        ESP_LOGW(TAG, "Invalid PID selection");
+        return;
+    }
+
+    s_poll_pid = pid_id;
+
+    // Populate unit dropdown with base + alt units for this PID
+    populate_unit_dropdown(pid_id);
+
+    // Send poll list with single PID at 10 Hz
+    esp_err_t err = comm_link_set_poll_list(&pid_id, 1, 10);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set poll list: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Start gauge update timer (100ms = 10 Hz, runs in LVGL task context)
+    s_gauge_timer = lv_timer_create(gauge_update_cb, 100, NULL);
+
+    lv_label_set_text(ui_Label2, "Stop");
+    s_polling = true;
+
+    const char *name = comm_link_get_pid_name(pid_id);
+    ESP_LOGI(TAG, "Polling PID 0x%04X (%s) @ 10 Hz", pid_id, name ? name : "?");
+}
+
+// ============================================================================
+// Unit Dropdown Changed - Update display unit for conversion
+// ============================================================================
+
+void unitChanged(lv_event_t * e)
+{
+    (void)e;
+    uint16_t sel = lv_dropdown_get_selected(ui_unnitdropdown2);
+
+    if (sel == 0) {
+        // First entry is always the base unit
+        s_display_unit = s_base_unit;
     } else {
-        // First connect - request vehicle scan
-        ESP_LOGI(TAG, "Requesting vehicle scan...");
-        lv_label_set_text(ui_Label1, "Scanning...");
-        
-        esp_err_t err = comm_link_request_scan(on_scan_complete);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to request scan: %s", esp_err_to_name(err));
-            lv_label_set_text(ui_Label1, "Connect");
+        // Map to alt unit
+        pid_unit_t alts[4];
+        int alt_count = pid_unit_get_alts(s_base_unit, alts, 4);
+        if ((int)(sel - 1) < alt_count) {
+            s_display_unit = alts[sel - 1];
         }
     }
+
+    const char *str = pid_unit_str(s_display_unit);
+    ESP_LOGI(TAG, "Display unit changed to: %s", str ? str : "?");
 }

@@ -22,3 +22,10 @@ size_t pid_db_get_obd2_count(void);
 const pid_entry_t *pid_db_get_gm_table(void);
 size_t pid_db_get_gm_count(void);
 
+/**
+ * @brief Convert unit enum to display string
+ * @param unit Unit enum value
+ * @return Short display string (e.g. "RPM", "kPa", "%")
+ */
+const char *pid_db_unit_str(unit_t unit);
+

@@ -51,6 +51,7 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 - [x] Implement table access functions (pid_db_get_obd2_table, pid_db_get_gm_table)
 - [x] Implement `pid_db_lookup()` -- find entry by PID number, return pointer or NULL
 - [x] Implement `pid_db_decode()` -- take raw bytes + pid_entry_t, return float engineering value
+- [x] Implement `pid_db_unit_str()` -- convert unit_t enum to display string (RPM, kPa, %, C, etc.)
 - [ ] Implement unit conversion helpers (C to F, kPa to PSI, km/h to mph, L/100km to MPG)
 - [ ] Build compile-time hash index or sorted array with binary search for fast lookup
 - [ ] Add PID supported-bitmap helpers (decode Mode 01 PID 0x00/0x20/0x40/... responses)
@@ -135,6 +136,7 @@ No poll groups - each PID has individual priority setting.
 - [x] Add link detection: monitor UART RX for heartbeat from display node
 - [x] Add delivery tracking: maintain sequence numbers, log frame errors
 - [x] Handle CONFIG_CMD messages received from display node (poll list changes, scan requests)
+- [x] Implement `comm_link_send_pid_metadata()` -- send PID name/unit batches to Display Node
 - [x] Write `CMakeLists.txt`
 
 ---
@@ -175,6 +177,7 @@ Node is a headless backend. See `CAN_Display/components/wifi_manager/`.
 - [x] Create `init_components()` function for all component init
 - [x] Create placeholder `create_tasks()` function
 - [x] Integrate sys_mgr init and start
+- [x] Extend scan handler -- send VEHICLE_INFO → PID_METADATA batches → SCAN_STATUS_COMPLETE
 - [ ] Implement actual task creation (CAN, Poll, Comm) when components ready
 - [ ] Add graceful shutdown handling
 - [ ] Create all FreeRTOS tasks with correct core pinning, priority, and stack sizes
@@ -191,5 +194,5 @@ Node is a headless backend. See `CAN_Display/components/wifi_manager/`.
 - [x] Create `partitions.csv` (NVS, app partitions)
 - [x] Verify full build with PlatformIO (zero errors, zero warnings)
 - [x] Flash to hardware and confirm MCP2515 initializes (detected, 500kbps configured)
-- [ ] Confirm UART link to display node sends/receives frames
-- [ ] Test CAN bus communication with actual vehicle
+- [x] Confirm UART link to display node sends/receives frames
+- [x] Test CAN bus communication with actual vehicle (Ford F-150, VIN: 1FTLR4FEXBPA98994, 49 PIDs)

@@ -32,9 +32,9 @@
 // ============================================================================
 
 // Configuration registers (in config mode only)
+#define MCP2515_CNF3            0x28    // Correct address (was 0x2C - aliased CANINTF)
+#define MCP2515_CNF2            0x29    // Correct address (was 0x2B - aliased CANINTE)
 #define MCP2515_CNF1            0x2A
-#define MCP2515_CNF2            0x2B
-#define MCP2515_CNF3            0x2C
 
 // Control registers
 #define MCP2515_CANCTRL         0x0F

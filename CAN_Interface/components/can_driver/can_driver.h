@@ -193,6 +193,13 @@ uint32_t can_driver_get_rx_queue_count(void);
 esp_err_t can_driver_get_status(can_status_t *status);
 
 /**
+ * @brief Abort all pending TX buffer transmissions
+ * Call after a request timeout to free TX buffers for the next request.
+ * @return ESP_OK on success
+ */
+esp_err_t can_driver_abort_tx(void);
+
+/**
  * @brief Reset error counters and clear error state
  * @return ESP_OK on success
  */
