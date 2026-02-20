@@ -63,6 +63,11 @@ File sequence number stored in NVS namespace `"logger"`, key `"filenum"`.
 
 ## SD Card Interface
 
+Board-specific SD card interface selected at compile time via device header
+defines (`SD_USE_SDMMC`).
+
+### CrowPanel — SPI (Default)
+
 Shares SPI2_HOST bus with XPT2046 touch controller (separate CS pins):
 - **MOSI**: GPIO 11 (shared with touch)
 - **MISO**: GPIO 13 (shared with touch)
@@ -70,9 +75,21 @@ Shares SPI2_HOST bus with XPT2046 touch controller (separate CS pins):
 - **CS**: GPIO 10 (SD card dedicated)
 - **Touch CS**: GPIO 0 (separate)
 
-SPI bus initialized by `touch_driver` with DMA enabled (`SPI_DMA_CH_AUTO`) and `max_transfer_sz=4096` for SD card compatibility. SD card added as second device via `spi_bus_add_device` equivalent (sdspi host).
+SPI bus initialized by `touch_driver` with DMA enabled (`SPI_DMA_CH_AUTO`).
+SD card added as second device on the same host. Filesystem: FAT via
+`esp_vfs_fat_sdspi_mount()`, mounted at `/sdcard`.
 
-Filesystem: FAT via `esp_vfs_fat_sdspi_mount()`, mounted at `/sdcard`.
+### Waveshare 2.1" — SDMMC 1-bit
+
+Dedicated SD card bus (no SPI sharing):
+- **CLK**: GPIO 2
+- **CMD**: GPIO 1
+- **D0**: GPIO 42
+- **D3**: Directly connected (active high)
+- **TCA9554 EXIO4**: Directly connected (active high)
+
+SDMMC 1-bit mode via `esp_vfs_fat_sdmmc_mount()`. Higher throughput than SPI.
+Signal pins defined in the device header (`waveshare_esp32s3_touch_lcd_2_1.h`).
 
 ## Buffering Strategy
 
@@ -132,12 +149,7 @@ data_logger/
 - `sdmmc` — SD/MMC card driver
 - `comm_link` — PID name/unit lookup, PID value cache
 - `system` — `sys_time_ms()` for creation timestamp
-- `devices` — `SD_CS_PIN`, `TOUCH_SPI_HOST` pin definitions
+- `devices` — SD pin definitions, `SD_USE_SDMMC` dispatch
 - `driver` — GPIO/SPI driver
 - `nvs_flash` — File sequence number persistence
-
-- `sdmmc` or `spi_master` (SD card interface)
-- `fatfs` (FAT filesystem via ESP-IDF VFS)
-- `comm_link/pid_store` (current PID values to log)
-- `shared/pid_types` (PID names and units for CSV headers)
-- `system` (logging, timing)
+- `tca9554` — SD D3 enable on Waveshare (via EXIO4)
