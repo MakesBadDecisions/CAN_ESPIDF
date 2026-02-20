@@ -82,15 +82,36 @@
 // Filter and mask registers
 #define MCP2515_RXF0SIDH        0x00
 #define MCP2515_RXF0SIDL        0x01
+#define MCP2515_RXF0EID8        0x02
+#define MCP2515_RXF0EID0        0x03
 #define MCP2515_RXF1SIDH        0x04
+#define MCP2515_RXF1SIDL        0x05
+#define MCP2515_RXF1EID8        0x06
+#define MCP2515_RXF1EID0        0x07
 #define MCP2515_RXF2SIDH        0x08
+#define MCP2515_RXF2SIDL        0x09
+#define MCP2515_RXF2EID8        0x0A
+#define MCP2515_RXF2EID0        0x0B
 #define MCP2515_RXF3SIDH        0x10
+#define MCP2515_RXF3SIDL        0x11
+#define MCP2515_RXF3EID8        0x12
+#define MCP2515_RXF3EID0        0x13
 #define MCP2515_RXF4SIDH        0x14
+#define MCP2515_RXF4SIDL        0x15
+#define MCP2515_RXF4EID8        0x16
+#define MCP2515_RXF4EID0        0x17
 #define MCP2515_RXF5SIDH        0x18
+#define MCP2515_RXF5SIDL        0x19
+#define MCP2515_RXF5EID8        0x1A
+#define MCP2515_RXF5EID0        0x1B
 #define MCP2515_RXM0SIDH        0x20
 #define MCP2515_RXM0SIDL        0x21
+#define MCP2515_RXM0EID8        0x22
+#define MCP2515_RXM0EID0        0x23
 #define MCP2515_RXM1SIDH        0x24
 #define MCP2515_RXM1SIDL        0x25
+#define MCP2515_RXM1EID8        0x26
+#define MCP2515_RXM1EID0        0x27
 
 // ============================================================================
 // CANCTRL Register Bits

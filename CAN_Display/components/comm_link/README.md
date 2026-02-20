@@ -50,6 +50,7 @@ message by type.
 - RX heartbeat monitor with 2-second timeout
 - `comm_link_get_state()` returns `COMM_LINK_CONNECTED` or `COMM_LINK_DISCONNECTED`
 - `comm_link_get_stats()` returns frame counters (rx, tx, pid updates, errors)
+- `comm_link_get_can_status()` returns remote CAN bus state from heartbeat (0=off, 1=running, 2=error)
 
 ## Files
 

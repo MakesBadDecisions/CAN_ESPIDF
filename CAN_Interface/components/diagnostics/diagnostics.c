@@ -174,27 +174,35 @@ esp_err_t diagnostics_scan_ecus(diag_ecu_t *ecus, uint8_t max_count, uint8_t *ou
     s_ctx.state = DIAG_STATE_SCANNING;
     s_ctx.vehicle.ecu_count = 0;
     
-    // Scan ECU IDs 0x7E8 through 0x7EF
+    // Physical addressing: query each ECU (0x7E0-0x7E7) individually
+    // This avoids the broadcast first-responder problem
     obd2_response_t resp;
     
     for (uint8_t i = 0; i < 8; i++) {
-        uint32_t ecu_id = OBD2_CAN_ECM_RX_ID + i;
+        uint32_t tx_id = OBD2_CAN_ECM_TX_ID + i;  // 0x7E0 + i
+        uint32_t rx_id = OBD2_CAN_ECM_RX_ID + i;  // 0x7E8 + i
         
-        // Query PID 0x00 (supported PIDs) targeting specific ECU
-        esp_err_t err = obd2_request_pid(0x01, 0x00, &resp);
+        obd2_request_t req = {
+            .mode = OBD2_MODE_CURRENT_DATA,
+            .pid = 0x00,
+            .tx_id = tx_id,      // Physical address, not broadcast
+            .timeout_ms = 150    // Short timeout for discovery
+        };
         
-        if (err == ESP_OK && resp.ecu_id == ecu_id) {
+        esp_err_t err = obd2_request(&req, &resp);
+        
+        if (err == ESP_OK && resp.status == OBD2_STATUS_OK && resp.ecu_id == rx_id) {
             diag_ecu_t *ecu = &s_ctx.vehicle.ecus[s_ctx.vehicle.ecu_count];
-            ecu->ecu_id = ecu_id;
+            ecu->ecu_id = rx_id;
             ecu->responded = true;
-            snprintf(ecu->name, sizeof(ecu->name), "ECU_%lX", (unsigned long)ecu_id);
+            snprintf(ecu->name, sizeof(ecu->name), "ECU_%lX", (unsigned long)rx_id);
             
             if (ecus && s_ctx.vehicle.ecu_count < max_count) {
                 ecus[s_ctx.vehicle.ecu_count] = *ecu;
             }
             
             s_ctx.vehicle.ecu_count++;
-            SYS_LOGI(TAG, "Found ECU: 0x%03lX", (unsigned long)ecu_id);
+            SYS_LOGI(TAG, "Found ECU: 0x%03lX", (unsigned long)rx_id);
         }
         
         vTaskDelay(pdMS_TO_TICKS(50));  // Delay between queries

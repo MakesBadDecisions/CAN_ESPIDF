@@ -11,4 +11,8 @@ idf_component_register(
         system
         lvgl
         ui
+        devices
+        i2c_bus
+        tca9554
+        qmi8658
 )

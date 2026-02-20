@@ -153,3 +153,23 @@ void mcp2515_write_register(uint8_t addr, uint8_t value);
  * @return true if device responds correctly
  */
 bool mcp2515_probe(void);
+
+/**
+ * @brief Configure hardware acceptance filters for specific CAN IDs
+ *
+ * Sets the MCP2515 masks and filters to accept only the specified standard
+ * (11-bit) CAN IDs. Requires entering config mode briefly. Both RX buffers
+ * share the same filter set. Up to 6 IDs can be filtered (RXF0-RXF5).
+ * To accept more IDs, use a looser mask that covers the range.
+ *
+ * @param ids      Array of standard CAN IDs to accept
+ * @param count    Number of IDs (1-6, or 0 to accept all)
+ * @return ESP_OK on success
+ */
+esp_err_t mcp2515_set_filters(const uint32_t *ids, uint8_t count);
+
+/**
+ * @brief Clear hardware filters (accept all CAN frames)
+ * @return ESP_OK on success
+ */
+esp_err_t mcp2515_clear_filters(void);

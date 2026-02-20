@@ -30,10 +30,10 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 - [x] Fix MCP2515 ISR task watchdog starvation -- drain loop (read CANINTF until 0) + taskYIELD() every 8 iterations
 - [x] Add configurable bit rate (125k, 250k, 500k, 1M)
 - [x] Verify MCP2515 initialization on hardware (detected, configured @ 500kbps)
-- [ ] Add MCP2515 hardware filter configuration (2 masks, 6 filters)
+- [x] Add MCP2515 hardware filter configuration (2 masks, 6 filters) -- dynamic ECU-based filtering with physical addressing discovery
 - [ ] Implement backend selection at runtime (primary MCP2518FD, fallback MCP2515/TWAI)
-- [ ] Add bus-off detection and automatic recovery logic
-- [ ] Add CAN error counter reporting (TEC/REC) in get_status
+- [x] Add bus-off detection and automatic recovery logic (hard SPI reset + full reconfigure, ISR drain-loop protection, rate-limited logging)
+- [x] Add CAN error counter reporting (TEC/REC) in get_status
 - [ ] Implement TWAI backend (`twai_backend.c`) -- Phase 2, validates HAL with 2 backends; also for 1-Wire GM
 - [x] Implement MCP2518FD SPI backend (`mcp2518fd.c`) -- full driver: SPI primitives, mode control, bitrate config, FIFO/filter setup, TX/RX, ISR task
 - [x] Wire MCP2518FD into can_driver.c dispatch layer (all 11 API calls)
@@ -197,7 +197,8 @@ No poll groups - each PID has individual priority setting.
 - [x] Implement UART frame TX: start byte + header + payload + CRC16
 - [x] Implement UART frame RX: scan for start byte, validate CRC, dispatch by message type
 - [x] Implement PID data batching: collect changed PIDs since last TX, pack into UART frames
-- [x] Implement heartbeat message (sent every 500ms, includes bus status, heap, uptime)
+- [x] Implement heartbeat message (sent every 500ms, includes node_state, can_status, heap, uptime)
+- [x] Heartbeat can_status reflects real CAN driver state (RUNNING/BUS_OFF/ERROR_PASSIVE)
 - [x] Add link detection: monitor UART RX for heartbeat from display node
 - [x] Add delivery tracking: maintain sequence numbers, log frame errors
 - [x] Handle CONFIG_CMD messages received from display node (poll list changes, scan requests)
@@ -243,6 +244,7 @@ Node is a headless backend. See `CAN_Display/components/wifi_manager/`.
 - [x] Create placeholder `create_tasks()` function
 - [x] Integrate sys_mgr init and start
 - [x] Extend scan handler -- send VEHICLE_INFO → PID_METADATA batches → SCAN_STATUS_COMPLETE
+- [x] Scan guard -- check CAN driver state before scan, attempt recovery, send SCAN_STATUS_FAILED if CAN not running
 - [ ] Implement actual task creation (CAN, Poll, Comm) when components ready
 - [ ] Add graceful shutdown handling
 - [ ] Create all FreeRTOS tasks with correct core pinning, priority, and stack sizes

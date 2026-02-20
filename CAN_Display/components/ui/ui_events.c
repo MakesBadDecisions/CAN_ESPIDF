@@ -7,8 +7,10 @@
 #include "comm_link.h"
 #include "display_driver.h"
 #include "gauge_engine.h"
+#include "data_logger.h"
+#include "pid_types.h"
 #include "esp_log.h"
-#include "screens/ui_Screen1.h"
+#include "ui_Screen1.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -51,6 +53,62 @@ static lv_timer_t *s_scan_timer = NULL;
 static bool s_events_registered = false;
 
 // ============================================================================
+// Connection Status Label (ui_statusLabel1 from SquareLine Studio)
+// ============================================================================
+
+static comm_link_state_t s_last_link_state = COMM_LINK_DISCONNECTED;
+static uint8_t s_last_can_status = 0;
+static lv_timer_t *s_status_timer = NULL;
+
+/** Update the status label to show both UART link and CAN bus state */
+static void update_status_label(void)
+{
+    if (!ui_statusLabel1) return;
+
+    comm_link_state_t link = comm_link_get_state();
+    uint8_t can = comm_link_get_can_status();
+
+    if (link == s_last_link_state && can == s_last_can_status) return;
+    s_last_link_state = link;
+    s_last_can_status = can;
+
+    // Build UART portion
+    const char *uart_str;
+    switch (link) {
+        case COMM_LINK_CONNECTED:    uart_str = "OK";    break;
+        case COMM_LINK_ERROR:        uart_str = "ERR";   break;
+        default:                     uart_str = "OFF";   break;
+    }
+
+    // Build CAN portion
+    const char *can_str;
+    switch (can) {
+        case 1:  can_str = "OK";  break;
+        case 2:  can_str = "ERR"; break;
+        default: can_str = "OFF"; break;
+    }
+
+    static char status_buf[32];
+    snprintf(status_buf, sizeof(status_buf), "UART: %s | CAN: %s", uart_str, can_str);
+    lv_label_set_text(ui_statusLabel1, status_buf);
+
+    // Color: green only if both OK, red if any error, yellow if mixed
+    if (link == COMM_LINK_CONNECTED && can == 1) {
+        lv_obj_set_style_text_color(ui_statusLabel1, lv_color_hex(0x44FF44), LV_PART_MAIN | LV_STATE_DEFAULT);
+    } else if (link == COMM_LINK_ERROR || can == 2) {
+        lv_obj_set_style_text_color(ui_statusLabel1, lv_color_hex(0xFF4444), LV_PART_MAIN | LV_STATE_DEFAULT);
+    } else {
+        lv_obj_set_style_text_color(ui_statusLabel1, lv_color_hex(0xFFCC00), LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+}
+
+static void status_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    update_status_label();
+}
+
+// ============================================================================
 // Scan Timeout Timer
 // ============================================================================
 
@@ -70,12 +128,27 @@ static void scan_timeout_cb(lv_timer_t *timer)
 // Gauge Update Timer (10 Hz, LVGL task context)
 // ============================================================================
 
+static uint32_t s_stale_check_tick = 0;
+
 static void gauge_update_cb(lv_timer_t *timer)
 {
     (void)timer;
 
+    // Skip update if no new data arrived (check stale every 1s regardless)
+    bool new_data = gauge_engine_has_new_data();
+    uint32_t now = lv_tick_get();
+    bool stale_check = (now - s_stale_check_tick) >= 1000;
+
+    if (!new_data && !stale_check) return;
+    if (stale_check) s_stale_check_tick = now;
+
     // Let gauge_engine fetch values + convert + format strings
     gauge_engine_update();
+
+    // Log a data row to SD card (if logging active)
+    if (new_data) {
+        logger_log_row();
+    }
 
     // Push formatted strings to LVGL labels
     for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
@@ -85,6 +158,12 @@ static void gauge_update_cb(lv_timer_t *timer)
         lv_obj_t *label = *(s_gauge_widgets[i].value_label);
         if (label) {
             lv_label_set_text(label, g->value_str);
+            // Dim text when data is stale
+            if (g->stale) {
+                lv_obj_set_style_text_opa(label, LV_OPA_40, LV_PART_MAIN | LV_STATE_DEFAULT);
+            } else {
+                lv_obj_set_style_text_opa(label, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+            }
         }
     }
 }
@@ -186,17 +265,6 @@ static void populate_all_pid_dropdowns(void)
         }
     }
 
-    // Auto-select first PID and populate unit dropdown for gauge 0
-    gauge_engine_set_pid(0, 0);
-
-    static char unit_opts[GAUGE_UNIT_OPTS_LEN];
-    gauge_engine_get_unit_options(0, unit_opts, sizeof(unit_opts));
-    lv_obj_t *unit_dd = *(s_gauge_widgets[0].unit_dropdown);
-    if (unit_dd) {
-        lv_dropdown_set_options(unit_dd, unit_opts);
-        lv_dropdown_set_selected(unit_dd, 0);
-    }
-
     ESP_LOGI(TAG, "Populated %d gauge dropdowns with %d PIDs",
              (int)NUM_GAUGE_WIDGETS, count);
 }
@@ -232,6 +300,60 @@ static void on_scan_complete(scan_status_t status, const comm_vehicle_info_t *in
 
         // Wire up dropdown events (idempotent)
         register_gauge_events();
+
+        // Restore saved gauge config (PID + unit per slot) from NVS
+        int restored = gauge_engine_load_config();
+        if (restored > 0) {
+            // Sync dropdown selections to match restored slots
+            int meta_count = comm_link_get_pid_meta_count();
+            for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+                const gauge_slot_t *g = gauge_engine_get_slot(i);
+                if (!g || g->pid_id == 0xFFFF) continue;
+
+                // Find metadata index for this PID to set dropdown selection
+                for (int m = 0; m < meta_count; m++) {
+                    if (comm_link_get_meta_pid_id(m) == g->pid_id) {
+                        lv_obj_t *pid_dd = *(s_gauge_widgets[i].pid_dropdown);
+                        if (pid_dd) lv_dropdown_set_selected(pid_dd, m);
+                        break;
+                    }
+                }
+
+                // Refresh unit dropdown and select saved unit
+                static char unit_opts[GAUGE_UNIT_OPTS_LEN];
+                int n_units = gauge_engine_get_unit_options(i, unit_opts, sizeof(unit_opts));
+                lv_obj_t *unit_dd = *(s_gauge_widgets[i].unit_dropdown);
+                if (unit_dd && n_units > 0) {
+                    lv_dropdown_set_options(unit_dd, unit_opts);
+                    // Find which index corresponds to current display_unit
+                    if (g->display_unit != g->base_unit) {
+                        pid_unit_t alts[4];
+                        int n_alts = pid_unit_get_alts(g->base_unit, alts, 4);
+                        for (int u = 0; u < n_alts; u++) {
+                            if (alts[u] == g->display_unit) {
+                                lv_dropdown_set_selected(unit_dd, u + 1);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            ESP_LOGI(TAG, "Restored %d gauge slot(s) from NVS", restored);
+        } else {
+            // No saved config -- auto-select first PID on gauge 0 as default
+            gauge_engine_set_pid(0, 0);
+            lv_obj_t *pid_dd = *(s_gauge_widgets[0].pid_dropdown);
+            if (pid_dd) lv_dropdown_set_selected(pid_dd, 0);
+
+            static char def_unit_opts[GAUGE_UNIT_OPTS_LEN];
+            gauge_engine_get_unit_options(0, def_unit_opts, sizeof(def_unit_opts));
+            lv_obj_t *unit_dd = *(s_gauge_widgets[0].unit_dropdown);
+            if (unit_dd) {
+                lv_dropdown_set_options(unit_dd, def_unit_opts);
+                lv_dropdown_set_selected(unit_dd, 0);
+            }
+            ESP_LOGI(TAG, "No saved config, defaulted gauge 0 to first PID");
+        }
 
     } else {
         ESP_LOGW(TAG, "Scan failed with status %d", status);
@@ -280,7 +402,11 @@ void pollCAN(lv_event_t * e)
     (void)e;
 
     if (gauge_engine_is_polling()) {
-        // Stop
+        // Stop logging first, then stop polling
+        if (logger_get_state() == LOGGER_STATE_LOGGING) {
+            logger_stop();
+            ESP_LOGI(TAG, "Data logging stopped");
+        }
         gauge_engine_stop_polling();
         lv_label_set_text(ui_Label2, "Poll");
 
@@ -321,4 +447,63 @@ void pollCAN(lv_event_t * e)
 
     int n = gauge_engine_get_active_pid_count();
     ESP_LOGI(TAG, "Polling %d unique PIDs @ 10 Hz", n);
+
+    // Auto-start data logger if SD card is ready
+    if (logger_is_sd_mounted()) {
+        // Build list of polled PIDs from gauge slots
+        uint16_t log_pids[GAUGE_MAX_SLOTS];
+        int log_count = 0;
+        for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
+            const gauge_slot_t *g = gauge_engine_get_slot(i);
+            if (!g || g->pid_id == 0xFFFF) continue;
+            // Deduplicate
+            bool dup = false;
+            for (int j = 0; j < log_count; j++) {
+                if (log_pids[j] == g->pid_id) { dup = true; break; }
+            }
+            if (!dup) log_pids[log_count++] = g->pid_id;
+        }
+        if (log_count > 0) {
+            // Get VIN if available
+            comm_vehicle_info_t vinfo;
+            const char *vin = NULL;
+            if (comm_link_get_vehicle_info(&vinfo)) {
+                vin = vinfo.vin;
+            }
+            esp_err_t log_ret = logger_start(log_pids, log_count, vin);
+            if (log_ret == ESP_OK) {
+                ESP_LOGI(TAG, "Data logging started (%d channels)", log_count);
+            } else {
+                ESP_LOGW(TAG, "Data logging failed to start: %s", esp_err_to_name(log_ret));
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Post-Init (called from main.c after ui_init + gauge_engine_init)
+// Must be called with display lock held.
+// ============================================================================
+
+void ui_events_post_init(void)
+{
+    // Set initial state on SquareLine-created label
+    if (ui_statusLabel1) {
+        lv_label_set_text(ui_statusLabel1, "UART: OFF | CAN: OFF");
+        lv_obj_set_style_text_color(ui_statusLabel1, lv_color_hex(0xFFCC00), LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    s_last_link_state = COMM_LINK_DISCONNECTED;
+    s_last_can_status = 0;
+    s_status_timer = lv_timer_create(status_timer_cb, 500, NULL);
+
+    // Show saved VIN from NVS (if available from previous session)
+    comm_vehicle_info_t saved_info;
+    if (comm_link_get_vehicle_info(&saved_info)) {
+        static char vin_text[32];
+        snprintf(vin_text, sizeof(vin_text), "VIN: %.17s", saved_info.vin);
+        lv_label_set_text(ui_vehicleInfoLabel1, vin_text);
+        ESP_LOGI(TAG, "Showing saved VIN: %.17s", saved_info.vin);
+    }
+
+    ESP_LOGI(TAG, "Status label and timer started");
 }

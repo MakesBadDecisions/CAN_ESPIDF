@@ -10,6 +10,8 @@
 #include "system.h"
 #include "device.h"
 #include "driver/uart.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -18,6 +20,9 @@
 #include <string.h>
 
 static const char *TAG = "comm_link";
+
+#define NVS_NAMESPACE   "vehicle"
+#define NVS_KEY_VINFO   "vinfo"
 
 // ============================================================================
 // Configuration
@@ -71,6 +76,7 @@ static struct {
     comm_vehicle_info_t vehicle_info;
     bool                vehicle_info_valid;
     scan_status_t       scan_status;
+    uint8_t             remote_can_status;   // 0=bus off, 1=bus on, 2=error (from Interface heartbeat)
     SemaphoreHandle_t   vehicle_mutex;
     
     // PID metadata store (RAM only, repopulated each scan)
@@ -279,7 +285,11 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
     
     switch ((comm_msg_type_t)header.msg_type) {
         case MSG_HEARTBEAT:
-            // Interface heartbeat - link alive
+            // Interface heartbeat - link alive + CAN status
+            if (payload && header.payload_len >= sizeof(comm_heartbeat_t)) {
+                const comm_heartbeat_t *hb = (const comm_heartbeat_t *)payload;
+                s_ctx.remote_can_status = hb->can_status;
+            }
             break;
             
         case MSG_PID_DATA_SINGLE:
@@ -311,6 +321,16 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
                     ESP_LOGI(TAG, "Vehicle info: VIN=%.17s, %u ECUs",
                              s_ctx.vehicle_info.vin,
                              s_ctx.vehicle_info.ecu_count);
+
+                    // Persist to NVS for recall on next boot
+                    nvs_handle_t nvs;
+                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+                        nvs_set_blob(nvs, NVS_KEY_VINFO, &s_ctx.vehicle_info,
+                                     sizeof(comm_vehicle_info_t));
+                        nvs_commit(nvs);
+                        nvs_close(nvs);
+                        ESP_LOGI(TAG, "Vehicle info saved to NVS");
+                    }
                 }
             }
             break;
@@ -564,6 +584,19 @@ esp_err_t comm_link_init(void)
     ESP_LOGI(TAG, "Comm link initialized - UART%d TX=%d RX=%d @ %d bps", 
              UART_NUM, UART_TX_PIN, UART_RX_PIN, COMM_LINK_BAUD_RATE);
     
+    // Attempt to load vehicle info from NVS (previous session)
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(comm_vehicle_info_t);
+        if (nvs_get_blob(nvs, NVS_KEY_VINFO, &s_ctx.vehicle_info, &len) == ESP_OK
+            && len == sizeof(comm_vehicle_info_t)) {
+            s_ctx.vehicle_info_valid = true;
+            ESP_LOGI(TAG, "Vehicle info loaded from NVS: VIN=%.17s",
+                     s_ctx.vehicle_info.vin);
+        }
+        nvs_close(nvs);
+    }
+
     return ESP_OK;
 }
 
@@ -651,6 +684,11 @@ comm_link_state_t comm_link_get_state(void)
     return s_ctx.state;
 }
 
+uint8_t comm_link_get_can_status(void)
+{
+    return s_ctx.remote_can_status;
+}
+
 const comm_link_stats_t* comm_link_get_stats(void)
 {
     return &s_ctx.stats;
@@ -667,6 +705,9 @@ bool comm_link_get_pid(uint16_t pid_id, pid_cache_entry_t *out_value)
         for (int i = 0; i < COMM_LINK_PID_STORE_MAX; i++) {
             if (s_ctx.pid_store[i].valid && s_ctx.pid_store[i].pid_id == pid_id) {
                 *out_value = s_ctx.pid_store[i];
+                // Compute stale flag based on age
+                uint32_t age_ms = (xTaskGetTickCount() - out_value->timestamp) * portTICK_PERIOD_MS;
+                out_value->stale = (age_ms > PID_STALE_TIMEOUT_MS);
                 found = true;
                 break;
             }
@@ -685,9 +726,13 @@ int comm_link_get_all_pids(pid_cache_entry_t *out_values, int max_count)
     
     int count = 0;
     if (xSemaphoreTake(s_ctx.pid_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        uint32_t now = xTaskGetTickCount();
         for (int i = 0; i < COMM_LINK_PID_STORE_MAX && count < max_count; i++) {
             if (s_ctx.pid_store[i].valid) {
-                out_values[count++] = s_ctx.pid_store[i];
+                out_values[count] = s_ctx.pid_store[i];
+                uint32_t age_ms = (now - out_values[count].timestamp) * portTICK_PERIOD_MS;
+                out_values[count].stale = (age_ms > PID_STALE_TIMEOUT_MS);
+                count++;
             }
         }
         xSemaphoreGive(s_ctx.pid_mutex);
@@ -699,6 +744,22 @@ int comm_link_get_all_pids(pid_cache_entry_t *out_values, int max_count)
 void comm_link_register_pid_callback(comm_pid_callback_t cb)
 {
     s_ctx.pid_callback = cb;
+}
+
+bool comm_link_is_pid_stale(uint16_t pid_id)
+{
+    bool stale = true;
+    if (xSemaphoreTake(s_ctx.pid_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        for (int i = 0; i < COMM_LINK_PID_STORE_MAX; i++) {
+            if (s_ctx.pid_store[i].valid && s_ctx.pid_store[i].pid_id == pid_id) {
+                uint32_t age_ms = (xTaskGetTickCount() - s_ctx.pid_store[i].timestamp) * portTICK_PERIOD_MS;
+                stale = (age_ms > PID_STALE_TIMEOUT_MS);
+                break;
+            }
+        }
+        xSemaphoreGive(s_ctx.pid_mutex);
+    }
+    return stale;
 }
 
 esp_err_t comm_link_send_heartbeat(void)

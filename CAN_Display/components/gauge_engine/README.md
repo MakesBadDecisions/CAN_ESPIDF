@@ -95,7 +95,6 @@ gauge_engine/
 
 ## Future
 
-- [ ] NVS persistence -- save/load per-slot PID and unit assignments
 - [ ] Alert thresholds -- warning/critical limits with color changes
 - [ ] Value smoothing -- low-pass filter for jittery readings
 - [ ] Gauge type rendering -- sweep dials, bar graphs (currently numeric only)

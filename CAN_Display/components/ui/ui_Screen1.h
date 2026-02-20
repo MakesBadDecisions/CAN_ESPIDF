@@ -25,6 +25,7 @@ extern lv_obj_t * ui_vehicleInfoLabel1;
 extern void ui_event_pollCAN1(lv_event_t * e);
 extern lv_obj_t * ui_pollCAN1;
 extern lv_obj_t * ui_Label2;
+extern lv_obj_t * ui_statusLabel1;
 extern lv_obj_t * ui_gauge2;
 extern lv_obj_t * ui_piddropdown2;
 extern lv_obj_t * ui_unitdropdown2;
@@ -37,6 +38,7 @@ extern lv_obj_t * ui_gauge4;
 extern lv_obj_t * ui_piddropdown4;
 extern lv_obj_t * ui_unitdropdown4;
 extern lv_obj_t * ui_gaugeText4;
+extern lv_obj_t * ui_gyroPanel1;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

@@ -214,6 +214,27 @@ esp_err_t can_driver_clear_errors(void);
  */
 QueueHandle_t can_driver_get_rx_queue(void);
 
+/**
+ * @brief Configure hardware acceptance filters for specific CAN IDs
+ *
+ * After ECU discovery, call this to restrict reception to only the
+ * discovered ECU response IDs. Reduces ISR load from irrelevant traffic.
+ *
+ * @param ids    Array of standard (11-bit) CAN IDs to accept
+ * @param count  Number of IDs (0 = accept all, max backend-specific)
+ * @return ESP_OK on success
+ */
+esp_err_t can_driver_set_filters(const uint32_t *ids, uint8_t count);
+
+/**
+ * @brief Clear hardware acceptance filters (accept all CAN frames)
+ *
+ * Must be called before re-scanning to ensure all ECU responses are visible.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t can_driver_clear_filters(void);
+
 // ============================================================================
 // RX Callback Registration
 // ============================================================================

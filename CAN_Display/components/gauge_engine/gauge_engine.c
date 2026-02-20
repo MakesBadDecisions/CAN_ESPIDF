@@ -17,10 +17,15 @@
 #include "comm_link.h"
 #include "pid_types.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdio.h>
+
+#define NVS_NAMESPACE   "gauge_cfg"
+#define NVS_KEY_SLOTS   "slots"
 
 static const char *TAG = "gauge_eng";
 
@@ -32,9 +37,18 @@ static gauge_slot_t     s_slots[GAUGE_MAX_SLOTS];
 static SemaphoreHandle_t s_mutex = NULL;
 static bool             s_polling = false;
 static uint8_t          s_poll_rate_hz = 10;
+static bool             s_suppress_save = false;  // true during load_config
+static volatile bool    s_data_ready = false;     // set by PID callback, cleared by update
 
 #define LOCK()   xSemaphoreTake(s_mutex, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_mutex)
+
+// Compact NVS record per slot (4 bytes each)
+typedef struct __attribute__((packed)) {
+    uint16_t    pid_id;         // 0xFFFF = unused
+    uint8_t     display_unit;   // pid_unit_t cast to u8
+    uint8_t     reserved;       // alignment / future use
+} nvs_slot_record_t;
 
 // ============================================================================
 // Helpers
@@ -70,6 +84,7 @@ esp_err_t gauge_engine_init(void)
         s_slots[i].pid_id = 0xFFFF;
         s_slots[i].base_unit = PID_UNIT_NONE;
         s_slots[i].display_unit = PID_UNIT_NONE;
+        s_slots[i].stale = false;
         strcpy(s_slots[i].value_str, "---");
     }
     s_polling = false;
@@ -110,6 +125,7 @@ esp_err_t gauge_engine_set_pid(int slot, int pid_index)
         gauge_engine_rebuild_poll_list();
     }
 
+    gauge_engine_save_config();
     return ESP_OK;
 }
 
@@ -137,6 +153,7 @@ esp_err_t gauge_engine_set_unit(int slot, int unit_index)
     UNLOCK();
 
     ESP_LOGI(TAG, "Slot %d unit -> %s", slot, pid_unit_str(g->display_unit));
+    gauge_engine_save_config();
     return ESP_OK;
 }
 
@@ -150,6 +167,7 @@ esp_err_t gauge_engine_clear_slot(int slot)
     g->base_unit    = PID_UNIT_NONE;
     g->display_unit = PID_UNIT_NONE;
     g->value_valid  = false;
+    g->stale        = false;
     strcpy(g->value_str, "---");
     UNLOCK();
 
@@ -157,7 +175,124 @@ esp_err_t gauge_engine_clear_slot(int slot)
         gauge_engine_rebuild_poll_list();
     }
 
+    gauge_engine_save_config();
     return ESP_OK;
+}
+
+// ============================================================================
+// NVS Persistence
+// ============================================================================
+
+esp_err_t gauge_engine_save_config(void)
+{
+    if (s_suppress_save) return ESP_OK;  // skip during load_config
+
+    nvs_slot_record_t records[GAUGE_MAX_SLOTS];
+
+    LOCK();
+    for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
+        records[i].pid_id       = s_slots[i].pid_id;
+        records[i].display_unit = (uint8_t)s_slots[i].display_unit;
+        records[i].reserved     = 0;
+    }
+    UNLOCK();
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, NVS_KEY_SLOTS, records, sizeof(records));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGD(TAG, "Config saved to NVS");
+    } else {
+        ESP_LOGE(TAG, "NVS save failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+int gauge_engine_load_config(void)
+{
+    nvs_slot_record_t records[GAUGE_MAX_SLOTS];
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No saved gauge config (first boot)");
+        return 0;
+    }
+
+    size_t len = sizeof(records);
+    err = nvs_get_blob(handle, NVS_KEY_SLOTS, records, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || len != sizeof(records)) {
+        ESP_LOGW(TAG, "NVS blob read failed or size mismatch");
+        return 0;
+    }
+
+    // We need to map saved pid_id back to a metadata index (dropdown index).
+    // Metadata is populated by scan, so this must be called after scan.
+    int meta_count = comm_link_get_pid_meta_count();
+    if (meta_count == 0) {
+        ESP_LOGW(TAG, "No PID metadata -- cannot restore config");
+        return 0;
+    }
+
+    int restored = 0;
+    s_suppress_save = true;  // prevent set_pid/set_unit from overwriting NVS
+    for (int slot = 0; slot < GAUGE_MAX_SLOTS; slot++) {
+        if (records[slot].pid_id == 0xFFFF) continue;
+
+        // Find metadata index for this PID
+        int meta_idx = -1;
+        for (int m = 0; m < meta_count; m++) {
+            if (comm_link_get_meta_pid_id(m) == records[slot].pid_id) {
+                meta_idx = m;
+                break;
+            }
+        }
+
+        if (meta_idx < 0) {
+            ESP_LOGW(TAG, "Slot %d: PID 0x%04X not in current scan, skipping",
+                     slot, records[slot].pid_id);
+            continue;
+        }
+
+        // Assign PID (this sets base_unit + default display_unit)
+        gauge_engine_set_pid(slot, meta_idx);
+
+        // Restore display unit if different from base
+        pid_unit_t saved_unit = (pid_unit_t)records[slot].display_unit;
+        const gauge_slot_t *g = gauge_engine_get_slot(slot);
+        if (g && saved_unit != g->base_unit && saved_unit != PID_UNIT_NONE) {
+            // Find unit_index for this display_unit
+            pid_unit_t alts[4];
+            int n_alts = pid_unit_get_alts(g->base_unit, alts, 4);
+            for (int u = 0; u < n_alts; u++) {
+                if (alts[u] == saved_unit) {
+                    gauge_engine_set_unit(slot, u + 1); // 0=base, 1+=alts
+                    break;
+                }
+            }
+        }
+
+        restored++;
+        ESP_LOGI(TAG, "Slot %d restored: PID 0x%04X, unit %s",
+                 slot, records[slot].pid_id,
+                 pid_unit_str(saved_unit));
+    }
+
+    ESP_LOGI(TAG, "Restored %d/%d gauge slots from NVS", restored, GAUGE_MAX_SLOTS);
+    s_suppress_save = false;
+    return restored;
 }
 
 // ============================================================================
@@ -240,6 +375,16 @@ int gauge_engine_build_pid_options(char *buf, int buf_len)
 }
 
 // ============================================================================
+// PID Arrival Callback (called from comm_link RX task)
+// ============================================================================
+
+static void on_pid_data_received(const comm_pid_value_t *pid)
+{
+    (void)pid;
+    s_data_ready = true;
+}
+
+// ============================================================================
 // Polling Control
 // ============================================================================
 
@@ -251,6 +396,9 @@ esp_err_t gauge_engine_start_polling(uint8_t rate_hz)
     esp_err_t err = gauge_engine_rebuild_poll_list();
     if (err != ESP_OK) return err;
 
+    s_data_ready = false;
+    comm_link_register_pid_callback(on_pid_data_received);
+
     s_polling = true;
     ESP_LOGI(TAG, "Polling started @ %d Hz", rate_hz);
     return ESP_OK;
@@ -259,6 +407,7 @@ esp_err_t gauge_engine_start_polling(uint8_t rate_hz)
 esp_err_t gauge_engine_stop_polling(void)
 {
     s_polling = false;
+    comm_link_register_pid_callback(NULL);
     comm_link_clear_poll_list();
 
     // Reset all value displays
@@ -330,6 +479,11 @@ int gauge_engine_get_active_pid_count(void)
     return count;
 }
 
+bool gauge_engine_has_new_data(void)
+{
+    return s_data_ready;
+}
+
 // ============================================================================
 // Periodic Update
 // ============================================================================
@@ -337,6 +491,7 @@ int gauge_engine_get_active_pid_count(void)
 int gauge_engine_update(void)
 {
     int updated = 0;
+    s_data_ready = false;
 
     LOCK();
     for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
@@ -346,7 +501,17 @@ int gauge_engine_update(void)
         pid_cache_entry_t val;
         if (!comm_link_get_pid(g->pid_id, &val)) continue;
 
+        // Check stale flag from comm_link
+        if (val.stale) {
+            if (!g->stale) {
+                g->stale = true;
+                strcpy(g->value_str, "---");
+            }
+            continue;
+        }
+
         g->raw_value = val.value;
+        g->stale = false;
 
         if (g->display_unit != g->base_unit) {
             pid_unit_convert(val.value, g->base_unit, g->display_unit,

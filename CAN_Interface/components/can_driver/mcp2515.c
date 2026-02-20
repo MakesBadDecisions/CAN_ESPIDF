@@ -31,6 +31,12 @@ typedef struct {
     mcp2515_config_t    config;
     bool                initialized;
     volatile bool       isr_task_running;
+
+    // Cached hardware filter configuration (survives recovery resets)
+    bool     filters_active;     // true = filter mode, false = accept-all
+    uint32_t filter_ids[6];      // Standard 11-bit IDs for RXF0-RXF5
+    uint8_t  filter_count;       // Number of valid entries (0-6)
+    uint32_t filter_mask;        // Computed mask covering all IDs
 } mcp2515_driver_t;
 
 static mcp2515_driver_t s_driver = {0};
@@ -72,6 +78,72 @@ void mcp2515_write_register(uint8_t addr, uint8_t value)
 
 // Note: mcp2515_read_registers and mcp2515_write_registers removed - not currently used
 // Can be restored if needed for filter configuration or bulk register access
+
+/**
+ * @brief Write cached filter/mask configuration to MCP2515 registers.
+ *
+ * Must be called while the chip is in CONFIG mode (after reset or set_mode).
+ * Reads s_driver.filters_active, filter_ids[], filter_count, and filter_mask.
+ */
+static void mcp2515_write_filter_regs(void)
+{
+    if (!s_driver.filters_active || s_driver.filter_count == 0) {
+        // Accept-all mode
+        mcp2515_write_register(MCP2515_RXB0CTRL, RXBCTRL_RXM_ANY | RXBCTRL_BUKT);
+        mcp2515_write_register(MCP2515_RXB1CTRL, RXBCTRL_RXM_ANY);
+        mcp2515_write_register(MCP2515_RXM0SIDH, 0x00);
+        mcp2515_write_register(MCP2515_RXM0SIDL, 0x00);
+        mcp2515_write_register(MCP2515_RXM1SIDH, 0x00);
+        mcp2515_write_register(MCP2515_RXM1SIDL, 0x00);
+        return;
+    }
+
+    // Filter mode: standard frames only
+    // RXB0: filters 0-1, RXB1: filters 2-5
+    mcp2515_write_register(MCP2515_RXB0CTRL, RXBCTRL_RXM_STD | RXBCTRL_BUKT);
+    mcp2515_write_register(MCP2515_RXB1CTRL, RXBCTRL_RXM_STD);
+
+    // Mask: same for both RX buffers — match on bits that are common
+    uint8_t mask_sidh = (s_driver.filter_mask >> 3) & 0xFF;
+    uint8_t mask_sidl = (s_driver.filter_mask << 5) & 0xE0;
+    mcp2515_write_register(MCP2515_RXM0SIDH, mask_sidh);
+    mcp2515_write_register(MCP2515_RXM0SIDL, mask_sidl);
+    mcp2515_write_register(MCP2515_RXM0EID8, 0x00);
+    mcp2515_write_register(MCP2515_RXM0EID0, 0x00);
+    mcp2515_write_register(MCP2515_RXM1SIDH, mask_sidh);
+    mcp2515_write_register(MCP2515_RXM1SIDL, mask_sidl);
+    mcp2515_write_register(MCP2515_RXM1EID8, 0x00);
+    mcp2515_write_register(MCP2515_RXM1EID0, 0x00);
+
+    // Write filter registers (RXF0-RXF5), fill unused filters with first ID
+    static const uint8_t filter_sidh[] = {
+        MCP2515_RXF0SIDH, MCP2515_RXF1SIDH, MCP2515_RXF2SIDH,
+        MCP2515_RXF3SIDH, MCP2515_RXF4SIDH, MCP2515_RXF5SIDH
+    };
+    static const uint8_t filter_sidl[] = {
+        MCP2515_RXF0SIDL, MCP2515_RXF1SIDL, MCP2515_RXF2SIDL,
+        MCP2515_RXF3SIDL, MCP2515_RXF4SIDL, MCP2515_RXF5SIDL
+    };
+    static const uint8_t filter_eid8[] = {
+        MCP2515_RXF0EID8, MCP2515_RXF1EID8, MCP2515_RXF2EID8,
+        MCP2515_RXF3EID8, MCP2515_RXF4EID8, MCP2515_RXF5EID8
+    };
+    static const uint8_t filter_eid0[] = {
+        MCP2515_RXF0EID0, MCP2515_RXF1EID0, MCP2515_RXF2EID0,
+        MCP2515_RXF3EID0, MCP2515_RXF4EID0, MCP2515_RXF5EID0
+    };
+
+    for (int i = 0; i < 6; i++) {
+        uint32_t id = (i < s_driver.filter_count) ? s_driver.filter_ids[i]
+                                                  : s_driver.filter_ids[0];
+        uint8_t sidh = (id >> 3) & 0xFF;
+        uint8_t sidl = (id << 5) & 0xE0;
+        mcp2515_write_register(filter_sidh[i], sidh);
+        mcp2515_write_register(filter_sidl[i], sidl);
+        mcp2515_write_register(filter_eid8[i], 0x00);
+        mcp2515_write_register(filter_eid0[i], 0x00);
+    }
+}
 
 static void mcp2515_bit_modify(uint8_t addr, uint8_t mask, uint8_t value)
 {
@@ -306,12 +378,65 @@ static void mcp2515_isr_task(void *arg)
 {
     ESP_LOGI(TAG, "ISR task started");
     s_driver.isr_task_running = true;
+    TickType_t recovery_due = 0;  // tick when auto-recovery should fire (0 = none)
+    bool error_logged = false;    // rate-limit error spam
     
     while (s_driver.isr_task_running) {
         // Wait for interrupt notification or timeout (for periodic status check)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
         
         if (!s_driver.initialized || s_driver.state == CAN_STATE_STOPPED) {
+            recovery_due = 0;
+            error_logged = false;
+            continue;
+        }
+
+        // Auto-recovery: if a recovery timer is pending and has elapsed, attempt it
+        if (recovery_due && xTaskGetTickCount() >= recovery_due) {
+            recovery_due = 0;
+            error_logged = false;
+            ESP_LOGW(TAG, "Auto-recovery: hard reset...");
+
+            // Hard reset via SPI command — always works regardless of bus state
+            mcp2515_reset();
+
+            // Reconfigure registers (we're in config mode after reset)
+            mcp2515_configure_bitrate(s_driver.config.crystal_freq,
+                                      s_driver.config.can_bitrate);
+
+            // Restore RX buffer config (uses cached filter state)
+            mcp2515_write_filter_regs();
+
+            // Re-enable interrupts
+            mcp2515_write_register(MCP2515_CANINTE,
+                                   CANINT_RX0I | CANINT_RX1I |
+                                   CANINT_TX0I | CANINT_TX1I | CANINT_TX2I |
+                                   CANINT_ERRI | CANINT_MERR);
+
+            // Clear all flags
+            mcp2515_write_register(MCP2515_CANINTF, 0x00);
+            mcp2515_write_register(MCP2515_EFLG, 0x00);
+
+            // Back to normal mode
+            esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
+            if (ret == ESP_OK) {
+                s_driver.state = CAN_STATE_RUNNING;
+                s_driver.stats.tec = 0;
+                s_driver.stats.rec = 0;
+                ESP_LOGI(TAG, "Auto-recovery complete — CAN running");
+            } else {
+                s_driver.state = CAN_STATE_BUS_OFF;
+                ESP_LOGE(TAG, "Auto-recovery failed: %s", esp_err_to_name(ret));
+                recovery_due = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+            }
+            continue;  // skip drain loop this iteration
+        }
+
+        // If in bus-off or error-passive, don't process frames — just clear
+        // interrupt flags so we don't spin on garbage data from a dead bus
+        if (s_driver.state == CAN_STATE_BUS_OFF ||
+            s_driver.state == CAN_STATE_ERROR_PASSIVE) {
+            mcp2515_write_register(MCP2515_CANINTF, 0x00);
             continue;
         }
         
@@ -368,18 +493,35 @@ static void mcp2515_isr_task(void *arg)
                 s_driver.stats.tec = mcp2515_read_register(MCP2515_TEC);
                 s_driver.stats.rec = mcp2515_read_register(MCP2515_REC);
 
-                ESP_LOGW(TAG, "Error interrupt: EFLG=0x%02X TEC=%u REC=%u",
-                         eflg, s_driver.stats.tec, s_driver.stats.rec);
-
                 if (eflg & EFLG_TXBO) {
                     s_driver.state = CAN_STATE_BUS_OFF;
-                    ESP_LOGE(TAG, "Bus-off (TEC=%u) - call clear_errors to recover",
-                             s_driver.stats.tec);
+                    if (!error_logged) {
+                        ESP_LOGE(TAG, "Bus-off (TEC=%u) - hard reset in 2s",
+                                 s_driver.stats.tec);
+                        error_logged = true;
+                    }
+                    if (!recovery_due) {
+                        recovery_due = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+                    }
+                    // Clear flags and break — don't process garbage
+                    mcp2515_write_register(MCP2515_CANINTF, 0x00);
+                    break;
                 } else if (eflg & (EFLG_TXEP | EFLG_RXEP)) {
                     s_driver.state = CAN_STATE_ERROR_PASSIVE;
-                    ESP_LOGW(TAG, "Error-passive state");
+                    if (!error_logged) {
+                        ESP_LOGW(TAG, "Error-passive (TEC=%u REC=%u) - hard reset in 2s",
+                                 s_driver.stats.tec, s_driver.stats.rec);
+                        error_logged = true;
+                    }
+                    if (!recovery_due) {
+                        recovery_due = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+                    }
+                    mcp2515_write_register(MCP2515_CANINTF, 0x00);
+                    break;
                 } else if (eflg & EFLG_EWARN) {
                     s_driver.state = CAN_STATE_ERROR_WARNING;
+                    ESP_LOGW(TAG, "Error-warning (TEC=%u REC=%u)",
+                             s_driver.stats.tec, s_driver.stats.rec);
                 }
 
                 if (eflg & (EFLG_RX0OVR | EFLG_RX1OVR)) {
@@ -499,15 +641,8 @@ esp_err_t mcp2515_init(const mcp2515_config_t *config)
         goto err_bitrate;
     }
     
-    // Configure RX buffers to receive any message (no filtering)
-    mcp2515_write_register(MCP2515_RXB0CTRL, RXBCTRL_RXM_ANY | RXBCTRL_BUKT);  // Rollover enabled
-    mcp2515_write_register(MCP2515_RXB1CTRL, RXBCTRL_RXM_ANY);
-    
-    // Clear all masks (accept all messages)
-    mcp2515_write_register(MCP2515_RXM0SIDH, 0x00);
-    mcp2515_write_register(MCP2515_RXM0SIDL, 0x00);
-    mcp2515_write_register(MCP2515_RXM1SIDH, 0x00);
-    mcp2515_write_register(MCP2515_RXM1SIDL, 0x00);
+    // Configure RX buffers (uses cached filter state, default = accept all)
+    mcp2515_write_filter_regs();
     
     // Create RX queue
     s_driver.rx_queue = xQueueCreate(config->rx_queue_len, sizeof(can_frame_t));
@@ -772,20 +907,31 @@ esp_err_t mcp2515_clear_errors(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Bus-off requires explicit recovery: abort TX, cycle through config mode
-    if (s_driver.state == CAN_STATE_BUS_OFF) {
-        ESP_LOGW(TAG, "Bus-off recovery: cycling config mode...");
-        mcp2515_abort_all_tx();
-        esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_CONFIG);
-        if (ret == ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
-        }
+    // Bus-off or error-passive: full hardware reset + reconfigure
+    if (s_driver.state == CAN_STATE_BUS_OFF ||
+        s_driver.state == CAN_STATE_ERROR_PASSIVE) {
+        ESP_LOGW(TAG, "Error recovery: hard reset...");
+
+        mcp2515_reset();  // SPI reset — always works
+
+        // Reconfigure (we're in config mode after reset)
+        mcp2515_configure_bitrate(s_driver.config.crystal_freq,
+                                  s_driver.config.can_bitrate);
+        // Restore RX buffer config (uses cached filter state)
+        mcp2515_write_filter_regs();
+        mcp2515_write_register(MCP2515_CANINTE,
+                               CANINT_RX0I | CANINT_RX1I |
+                               CANINT_TX0I | CANINT_TX1I | CANINT_TX2I |
+                               CANINT_ERRI | CANINT_MERR);
+        mcp2515_write_register(MCP2515_CANINTF, 0x00);
+        mcp2515_write_register(MCP2515_EFLG, 0x00);
+
+        esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
         if (ret == ESP_OK) {
             s_driver.state = CAN_STATE_RUNNING;
-            ESP_LOGI(TAG, "Bus-off recovery complete");
+            ESP_LOGI(TAG, "Error recovery complete");
         } else {
-            ESP_LOGE(TAG, "Bus-off recovery failed: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Error recovery failed: %s", esp_err_to_name(ret));
             return ret;
         }
     }
@@ -806,4 +952,86 @@ esp_err_t mcp2515_clear_errors(void)
     }
     
     return ESP_OK;
+}
+
+// ============================================================================
+// Hardware Acceptance Filters
+// ============================================================================
+
+esp_err_t mcp2515_set_filters(const uint32_t *ids, uint8_t count)
+{
+    if (!s_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!ids || count == 0) {
+        return mcp2515_clear_filters();
+    }
+    if (count > 6) {
+        ESP_LOGW(TAG, "Filter count %u exceeds max 6, clamping", count);
+        count = 6;
+    }
+
+    // Validate and cache IDs; compute mask
+    uint32_t diff = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (ids[i] > 0x7FF) {
+            ESP_LOGE(TAG, "Filter ID 0x%lX exceeds 11-bit range",
+                     (unsigned long)ids[i]);
+            return ESP_ERR_INVALID_ARG;
+        }
+        s_driver.filter_ids[i] = ids[i];
+        diff |= (ids[i] ^ ids[0]);  // Accumulate differing bits
+    }
+    s_driver.filter_count  = count;
+    s_driver.filter_mask   = (~diff) & 0x7FF;  // 1 = must match, 0 = don't care
+    s_driver.filters_active = true;
+
+    ESP_LOGI(TAG, "Setting HW filters: %u IDs, mask=0x%03lX",
+             count, (unsigned long)s_driver.filter_mask);
+    for (uint8_t i = 0; i < count; i++) {
+        ESP_LOGI(TAG, "  RXF%u = 0x%03lX", i, (unsigned long)ids[i]);
+    }
+
+    // Enter config mode to write filter registers
+    esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_CONFIG);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enter config mode for filters");
+        return ret;
+    }
+
+    mcp2515_write_filter_regs();
+
+    ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to return to normal mode after filters");
+    }
+    return ret;
+}
+
+esp_err_t mcp2515_clear_filters(void)
+{
+    if (!s_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_driver.filters_active = false;
+    s_driver.filter_count   = 0;
+    s_driver.filter_mask    = 0;
+    memset(s_driver.filter_ids, 0, sizeof(s_driver.filter_ids));
+
+    ESP_LOGI(TAG, "Clearing HW filters (accept-all mode)");
+
+    esp_err_t ret = mcp2515_set_mode(CANCTRL_REQOP_CONFIG);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enter config mode to clear filters");
+        return ret;
+    }
+
+    mcp2515_write_filter_regs();
+
+    ret = mcp2515_set_mode(CANCTRL_REQOP_NORMAL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to return to normal mode after clearing filters");
+    }
+    return ret;
 }

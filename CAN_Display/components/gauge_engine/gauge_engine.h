@@ -44,6 +44,7 @@ typedef struct {
     float       display_value;      // Converted to display_unit
     char        value_str[GAUGE_VALUE_STR_LEN]; // Formatted string "123.4"
     bool        value_valid;        // Got at least one reading
+    bool        stale;              // PID data not updated within timeout
     uint32_t    last_update_tick;   // tick of last update
 } gauge_slot_t;
 
@@ -147,6 +148,17 @@ esp_err_t gauge_engine_stop_polling(void);
 bool gauge_engine_is_polling(void);
 
 /**
+ * @brief Check if new PID data has arrived since last update
+ *
+ * Set by the comm_link PID callback when data arrives.
+ * Cleared by gauge_engine_update(). Useful for the UI timer to
+ * skip redundant update cycles.
+ *
+ * @return true if new data is available
+ */
+bool gauge_engine_has_new_data(void);
+
+/**
  * @brief Update all active gauge slots with latest values from comm_link
  *
  * Call this periodically (e.g. from an LVGL timer at 10 Hz).  For each
@@ -169,4 +181,26 @@ esp_err_t gauge_engine_rebuild_poll_list(void);
  * @brief Get the number of unique PIDs currently being polled
  */
 int gauge_engine_get_active_pid_count(void);
+
+// ============================================================================
+// NVS Persistence
+// ============================================================================
+
+/**
+ * @brief Save current gauge slot config (PID + unit) to NVS
+ *
+ * Called automatically on set_pid, set_unit, clear_slot.
+ * Can also be called explicitly.
+ */
+esp_err_t gauge_engine_save_config(void);
+
+/**
+ * @brief Load saved gauge config from NVS and restore slot assignments
+ *
+ * Must be called AFTER scan completes (needs comm_link metadata to map
+ * PID IDs back to dropdown indices). Returns the number of slots restored.
+ *
+ * @return Number of slots successfully restored, or -1 on error
+ */
+int gauge_engine_load_config(void);
 

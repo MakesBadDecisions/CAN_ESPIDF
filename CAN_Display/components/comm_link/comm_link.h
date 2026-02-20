@@ -24,6 +24,7 @@
 #define COMM_LINK_RX_BUFFER     2048
 #define COMM_LINK_PID_STORE_MAX 64          // Max cached PID values
 #define PID_META_STORE_MAX      96          // Max PID metadata entries (RAM only)
+#define PID_STALE_TIMEOUT_MS    3000        // PID data older than this is stale
 
 // ============================================================================
 // Link State
@@ -45,6 +46,7 @@ typedef struct {
     uint8_t     unit;           // Unit enum
     uint32_t    timestamp;      // When received (local tick)
     bool        valid;          // Entry in use
+    bool        stale;          // Not updated within PID_STALE_TIMEOUT_MS
 } pid_cache_entry_t;
 
 // ============================================================================
@@ -108,6 +110,12 @@ esp_err_t comm_link_stop(void);
 comm_link_state_t comm_link_get_state(void);
 
 /**
+ * @brief Get remote CAN bus status from Interface heartbeat
+ * @return 0=bus off, 1=bus on, 2=error
+ */
+uint8_t comm_link_get_can_status(void);
+
+/**
  * @brief Get link statistics
  */
 const comm_link_stats_t* comm_link_get_stats(void);
@@ -127,6 +135,13 @@ bool comm_link_get_pid(uint16_t pid_id, pid_cache_entry_t *out_value);
  * @return Number of valid entries
  */
 int comm_link_get_all_pids(pid_cache_entry_t *out_values, int max_count);
+
+/**
+ * @brief Check if a cached PID value is stale
+ * @param pid_id PID to check
+ * @return true if stale or not found
+ */
+bool comm_link_is_pid_stale(uint16_t pid_id);
 
 /**
  * @brief Register callback for real-time PID updates

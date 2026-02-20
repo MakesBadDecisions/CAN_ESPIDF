@@ -4,5 +4,5 @@
 idf_component_register(
     SRCS "comm_link.c"
     INCLUDE_DIRS "."
-    REQUIRES driver system comm_protocol devices
+    REQUIRES driver system comm_protocol devices can_driver
 )

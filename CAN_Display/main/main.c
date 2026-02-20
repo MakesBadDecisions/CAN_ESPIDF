@@ -8,6 +8,8 @@
  * - Data logger SD writes (Core 0, Priority 3)
  * - WiFi AP / config + log download (Core 0, Priority 1)
  * - System monitor (Core 0, Priority 0)
+ *
+ * Boot sequence adapts to the active device via device.h defines.
  */
 
 #include <stdio.h>
@@ -18,8 +20,14 @@
 #include "display_driver.h"
 #include "touch_driver.h"
 #include "gauge_engine.h"
+#include "data_logger.h"
+#include "ui_events.h"
 #include "lvgl.h"
 #include "ui.h"
+#include "device.h"
+#include "i2c_bus.h"
+#include "tca9554.h"
+#include "qmi8658.h"
 
 void app_main(void)
 {
@@ -33,6 +41,24 @@ void app_main(void)
     // Print device info to verify hardware
     sys_print_device_info();
 
+    // Phase 0.5: I2C bus + GPIO expander (needed before display/touch on some boards)
+    ret = i2c_bus_init();
+    if (ret != ESP_OK) {
+        SYS_LOGW("I2C bus init failed: %s (may not be needed for this device)",
+                 esp_err_to_name(ret));
+    }
+    ret = tca9554_init();
+    if (ret != ESP_OK) {
+        SYS_LOGW("TCA9554 init failed: %s (may not be present on this device)",
+                 esp_err_to_name(ret));
+    }
+
+    // Phase 0.6: IMU (if present on this board)
+    ret = qmi8658_init();
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
+        SYS_LOGW("QMI8658 IMU init failed: %s", esp_err_to_name(ret));
+    }
+
     // Phase 1: Initialize display and LVGL
     ret = display_init();
     if (ret != ESP_OK) {
@@ -43,7 +69,7 @@ void app_main(void)
     // Give LVGL task time to start
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Phase 2: Initialize touch input (SPI + task on Core 0 + LVGL indev)
+    // Phase 2: Initialize touch input (device-specific: SPI or I2C + task on Core 0)
     ret = touch_init();
     if (ret != ESP_OK) {
         SYS_LOGE("Touch init failed: %s", esp_err_to_name(ret));
@@ -87,10 +113,22 @@ void app_main(void)
         SYS_LOGE("Gauge engine init failed: %s", esp_err_to_name(ret));
     }
 
+    // Phase 7: Create status label and start status polling timer
+    if (display_lock(1000)) {
+        ui_events_post_init();
+        display_unlock();
+    }
+
+    // Phase 8: Initialize data logger (SD card — SPI or SDMMC depending on device)
+    ret = logger_init();
+    if (ret != ESP_OK) {
+        SYS_LOGW("SD card init failed - logging disabled: %s", esp_err_to_name(ret));
+        // Non-fatal: continue without logging
+    }
+
     SYS_LOGI("=== Display Node Ready ===");
     SYS_LOGI("Free heap: %lu bytes", (unsigned long)sys_get_free_heap());
-    // TODO: Phase 5 - Initialize data_logger (SD card)
-    // TODO: Phase 6 - Initialize wifi_manager (WiFi AP for config + log download)
+    // TODO: Initialize wifi_manager (WiFi AP for config + log download)
 
     // Main loop - periodic status
     while (1) {

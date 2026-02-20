@@ -324,6 +324,45 @@ QueueHandle_t can_driver_get_rx_queue(void)
 }
 
 // ============================================================================
+// Hardware Acceptance Filters
+// ============================================================================
+
+esp_err_t can_driver_set_filters(const uint32_t *ids, uint8_t count)
+{
+    if (!s_can_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    switch (s_can_driver.backend) {
+        case CAN_BACKEND_MCP2515:
+            return mcp2515_set_filters(ids, count);
+        case CAN_BACKEND_MCP2518FD:
+            // TODO: implement mcp2518fd_set_filters()
+            SYS_LOGW(TAG, "MCP2518FD filters not implemented yet");
+            return ESP_OK;
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
+esp_err_t can_driver_clear_filters(void)
+{
+    if (!s_can_driver.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    switch (s_can_driver.backend) {
+        case CAN_BACKEND_MCP2515:
+            return mcp2515_clear_filters();
+        case CAN_BACKEND_MCP2518FD:
+            // MCP2518FD already accepts all by default
+            return ESP_OK;
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
+// ============================================================================
 // RX Callback Management
 // ============================================================================
 

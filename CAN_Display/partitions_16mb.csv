@@ -1,0 +1,8 @@
+# CAN_ESPIDF Display Node - Partition Table (16MB Flash)
+# For Waveshare ESP32-S3-Touch-LCD-2.1 (16MB Flash, 8MB Octal PSRAM)
+# Name,    Type, SubType, Offset,    Size,     Flags
+nvs,       data, nvs,     0x9000,    0x6000,
+phy_init,  data, phy,     0xf000,    0x1000,
+factory,   app,  factory, 0x10000,   0x3F0000,
+storage,   data, nvs,     0x400000,  0x10000,
+fatfs,     data, fat,     0x410000,  0xBF0000,

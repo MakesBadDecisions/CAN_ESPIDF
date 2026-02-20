@@ -4,7 +4,7 @@
 
 Provides a unified interface for sending and receiving CAN frames regardless of the underlying hardware. The CAN interface node supports multiple CAN backends simultaneously:
 
-- **MCP2515** - Phase 1 CAN backend. Standalone SPI-based CAN 2.0B controller, proven reliable from the Arduino project. Single channel on SPI2 (CS=GPIO 10, INT=GPIO 9). Vehicle-tested (Ford F-150, 500kbps, 49 PIDs verified).
+- **MCP2515** - Phase 1 CAN backend. Standalone SPI-based CAN 2.0B controller, proven reliable from the Arduino project. Single channel on SPI2 (CS=GPIO 10, INT=GPIO 9). Vehicle-tested (Ford F-150, 500kbps, 49 PIDs verified). Includes bus-off auto-recovery via hard SPI reset.
 - **MCP2518FD** - **Current primary backend.** Drop-in replacement for MCP2515 on the same SPI2 bus and CS/INT pins. Runs in CAN 2.0 classic mode for OBD-II compatibility. FIFO-based TX/RX architecture, interrupt-driven, 20MHz SPI clock, 40MHz crystal. Full implementation complete — pending vehicle validation.
 - **TWAI** - ESP32-S3 native CAN peripheral. Reserved for 1-Wire GM legacy single-wire network interface via adapter circuit.
 
@@ -99,6 +99,18 @@ Standalone MCP2515 SPI CAN controller. Proven from the Arduino project. Supersed
 - **Interrupt:** Active-low INT pin for RX ready / error / TX complete
 - **Pins:** CS=GPIO 10, INT=GPIO 9 (same pins as MCP2518FD CH0 for easy swap)
 
+### MCP2515 Error Recovery
+
+Bus-off and error-passive states are detected in the ISR task via EFLG register. Recovery uses a hard SPI reset strategy instead of config-mode cycling (which can time out if the drain loop is active):
+
+1. **Detection:** ISR task checks EFLG for TXBO (bus-off) or TXEP/RXEP (error-passive)
+2. **ISR protection:** On error state, drain loop breaks immediately — clears all interrupt flags and skips frame processing to prevent garbage frame floods
+3. **Recovery sequence:** SPI RESET command → full register reconfigure (bitrate, RX buffers, masks, interrupts, flags) → normal mode
+4. **Timing:** 2-second delay before first recovery attempt, 3-second retry on failure
+5. **Logging:** Rate-limited (logs once per state transition, not per ISR cycle)
+
+The `mcp2515_clear_errors()` function uses the same hard reset approach and is called by the scan guard in main.c before attempting a vehicle scan.
+
 ## MCP2518FD Backend Details (Current Primary)
 
 Waveshare 2-CH CAN FD HAT with MCP2518FD controller on SPI2 bus. Drop-in replacement for MCP2515 — same CS=GPIO10, INT=GPIO9 pins, same HAL API.
@@ -131,19 +143,6 @@ Waveshare 2-CH CAN FD HAT with MCP2518FD controller on SPI2 bus. Drop-in replace
 - `mcp2518fd_defs.h` — Complete register map (CiCON, CiNBTCFG, CiINT, FIFO, filter, OSC, message objects)
 - `mcp2518fd.h` — Config struct and API declarations
 - `mcp2518fd.c` — Full driver (~600 lines): SPI primitives, mode control, bitrate config, FIFO/filter setup, TX/RX frame packing, ISR task, init/deinit with error cleanup chain
-
-## MCP2515 Backend Details (Phase 1, Retained)
-
-Standalone MCP2515 SPI CAN controller. Proven from the Arduino project. Superseded by MCP2518FD as primary backend but retained for reference and fallback.
-
-- **Interface:** SPI2 (FSPI) at 8-10 MHz
-- **Crystal:** 8 MHz or 16 MHz (must match config)
-- **CAN 2.0B:** Standard/extended frames at 5kbps - 1Mbps
-- **Filters:** 2 masks, 6 filters (hardware acceptance filtering)
-- **TX Buffers:** 3 transmit buffers with priority
-- **RX Buffers:** 2 receive buffers with rollover
-- **Interrupt:** Active-low INT pin for RX ready / error / TX complete
-- **Pins:** CS=GPIO 10, INT=GPIO 9 (same pins as MCP2518FD CH0)
 
 ## TWAI Backend Details (Phase 2 / 1-Wire GM Legacy)
 

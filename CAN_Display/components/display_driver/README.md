@@ -2,33 +2,50 @@
 
 ## Purpose
 
-Initializes the ESP32-S3 RGB parallel LCD panel and LVGL graphics library for
-CrowPanel displays. Provides a thread-safe LVGL environment with an anti-tearing
-double-framebuffer architecture.
+Initializes the ESP32-S3 RGB parallel LCD panel and LVGL graphics library.
+Provides a thread-safe LVGL environment with an anti-tearing double-framebuffer
+architecture. Supports multiple display boards through compile-time device selection.
 
 Touch input is handled by the separate `touch_driver` component.
 
+## Supported Boards
+
+| Board | Init Path | Backlight | Resolution |
+|-------|-----------|-----------|------------|
+| CrowPanel 4.3" (DIS06043H) | Direct RGB | GPIO on/off | 480x272 |
+| Waveshare 2.1" (WS_TOUCH_LCD_21) | ST7701S SPI → RGB | PWM via LEDC | 480x480 |
+
 ## Architecture
 
+### CrowPanel (Direct RGB)
 ```
 ┌────────────────────────────────┐
-│     ui / gauge_engine          │
-│  (LVGL widgets and screens)    │
-└──────────────┬─────────────────┘
-               │  display_lock() / display_unlock()
-┌──────────────┴─────────────────┐
 │     LVGL v8.3 (direct_mode)    │
-│  - Draws into PSRAM framebuffers│
-│  - Timer handler on Core 1     │
 └──────────────┬─────────────────┘
                │  lvgl_flush_cb()
 ┌──────────────┴─────────────────┐
 │     esp_lcd_panel_rgb           │
-│  - Double FB in PSRAM (num_fbs=2)│
+│  - Double FB in PSRAM           │
 │  - Bounce buffers in SRAM       │
 │  - VSYNC-synced buffer swap     │
-│  - DMA to RGB parallel LCD      │
 └─────────────────────────────────┘
+```
+
+### Waveshare (ST7701S SPI + RGB)
+```
+┌──────────────────────────────────┐
+│  ST7701S SPI Init (one-time)     │
+│  - 9-bit SPI (cmd_bits=1)        │
+│  - 39 register commands           │
+│  - TCA9554 reset + CS control     │
+│  - SPI bus freed after init       │
+└──────────────┬───────────────────┘
+               │  then RGB panel takes over
+┌──────────────┴───────────────────┐
+│     esp_lcd_panel_rgb             │
+│  - Same double FB + bounce buf    │
+│  - PWM backlight (LEDC, 5kHz)    │
+└───────────────────────────────────┘
 ```
 
 ## Anti-Tearing Strategy
@@ -123,7 +140,8 @@ display_driver/
 ## Dependencies
 
 - `esp_lcd` — RGB panel driver
-- `driver` — GPIO (backlight, panel enable)
+- `driver` — GPIO (backlight, panel enable), LEDC (PWM backlight)
 - `esp_timer`
 - `devices` — Pin definitions and timing parameters
 - `lvgl` — Graphics library
+- `tca9554` — GPIO expander for LCD reset/CS (Waveshare)

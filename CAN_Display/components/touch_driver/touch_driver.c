@@ -1,20 +1,21 @@
 /**
  * @file touch_driver.c
- * @brief XPT2046 Touch Driver with Core 0 Polling and NVS Calibration
+ * @brief Touch Driver HAL — XPT2046 (SPI) and CST820 (I2C) Backends
  *
- * Touch SPI reads run on a dedicated Core 0 task to avoid stalling the
+ * Touch reads run on a dedicated Core 0 task to avoid stalling the
  * LCD bounce buffer DMA ISR on Core 1. The LVGL input device callback
- * only reads a volatile cache struct — zero SPI, instant return.
+ * only reads a volatile cache struct — zero I/O, instant return.
  *
- * Calibration uses a 4-corner crosshair screen. Results are stored in
- * NVS namespace "touch_cal" and loaded automatically on init.
+ * Backend selection is automatic via device.h defines:
+ *   TOUCH_TYPE_XPT2046 → SPI resistive, 4-corner calibration
+ *   TOUCH_TYPE_CST820  → I2C capacitive, no calibration needed
  */
 
 #include "touch_driver.h"
 #include "display_driver.h"
+#include "device.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,17 +23,52 @@
 #include "nvs.h"
 #include "lvgl.h"
 
-#if defined(DEVICE_DIS06043H)
-    #include "dis06043h.h"
-#elif defined(DEVICE_DIS07050H)
-    #include "dis07050h.h"
-#elif defined(DEVICE_DIS08070H)
-    #include "dis08070h.h"
-#else
-    #error "No device defined!"
+#if defined(TOUCH_TYPE_XPT2046)
+    #include "driver/spi_master.h"
+#elif defined(TOUCH_TYPE_CST820)
+    #include "driver/i2c.h"
+    #include "i2c_bus.h"
+    #include "tca9554.h"
 #endif
 
 static const char *TAG = "touch";
+
+// ============================================================================
+// Touch State Cache (written by Core 0 task, read by Core 1 LVGL callback)
+// ============================================================================
+
+typedef struct {
+    volatile int16_t  x;
+    volatile int16_t  y;
+    volatile bool     pressed;
+} touch_state_t;
+
+static TaskHandle_t        s_touch_task_handle = NULL;
+static lv_indev_drv_t      s_indev_drv;
+static touch_state_t       s_touch_state = { .x = 0, .y = 0, .pressed = false };
+
+// ============================================================================
+// LVGL Input Device Callback (Core 1 — instant, no I/O)
+// ============================================================================
+
+static void lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    (void)drv;
+
+    if (s_touch_state.pressed) {
+        data->point.x = s_touch_state.x;
+        data->point.y = s_touch_state.y;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+// ############################################################################
+// XPT2046 SPI Backend (Resistive Touch)
+// ############################################################################
+
+#if defined(TOUCH_TYPE_XPT2046)
 
 // XPT2046 SPI commands (12-bit, differential reference)
 #define XPT2046_CMD_X   0xD0  // Channel 5: X position
@@ -69,23 +105,10 @@ typedef struct {
 } touch_cal_t;
 
 // ============================================================================
-// Touch State Cache (written by Core 0 task, read by Core 1 LVGL callback)
-// ============================================================================
-
-typedef struct {
-    volatile int16_t  x;
-    volatile int16_t  y;
-    volatile bool     pressed;
-} touch_state_t;
-
-// ============================================================================
-// Private Data
+// XPT2046 Private Data
 // ============================================================================
 
 static spi_device_handle_t s_touch_spi = NULL;
-static TaskHandle_t        s_touch_task_handle = NULL;
-static lv_indev_drv_t      s_indev_drv;
-static touch_state_t       s_touch_state = { .x = 0, .y = 0, .pressed = false };
 static touch_cal_t         s_cal = {
     .x_min = TOUCH_X_MIN,
     .x_max = TOUCH_X_MAX,
@@ -201,24 +224,7 @@ static void touch_task(void *pvParameters)
 }
 
 // ============================================================================
-// LVGL Input Device Callback (Core 1 — instant, no SPI)
-// ============================================================================
-
-static void lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
-{
-    (void)drv;
-
-    if (s_touch_state.pressed) {
-        data->point.x = s_touch_state.x;
-        data->point.y = s_touch_state.y;
-        data->state = LV_INDEV_STATE_PRESSED;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
-// ============================================================================
-// NVS Load / Save
+// XPT2046 NVS Load / Save
 // ============================================================================
 
 static esp_err_t cal_load_from_nvs(void)
@@ -302,11 +308,12 @@ static esp_err_t spi_init(void)
         .sclk_io_num = TOUCH_SPI_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 32,
+        .max_transfer_sz = 4096,  // SD card needs larger transfers
     };
 
-    // No DMA — small transfers, avoids PSRAM bus contention
-    esp_err_t ret = spi_bus_initialize(TOUCH_SPI_HOST, &bus_cfg, SPI_DMA_DISABLED);
+    // DMA auto-channel — needed for SD card on same bus, harmless for touch
+    // (touch uses small inline SPI_TRANS_USE_TXDATA/RXDATA transactions)
+    esp_err_t ret = spi_bus_initialize(TOUCH_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
         return ret;
@@ -530,7 +537,7 @@ esp_err_t touch_start_calibration(void)
 }
 
 // ============================================================================
-// Public API
+// XPT2046 Public API
 // ============================================================================
 
 esp_err_t touch_init(void)
@@ -623,3 +630,164 @@ esp_err_t touch_clear_calibration(void)
     ESP_LOGI(TAG, "Calibration cleared from NVS");
     return ret;
 }
+
+// ############################################################################
+// CST820 I2C Backend (Capacitive Touch)
+// ############################################################################
+
+#elif defined(TOUCH_TYPE_CST820)
+
+// CST820 I2C registers
+#define CST820_REG_CHIP_ID      0x01
+#define CST820_REG_TOUCH_NUM    0x02
+#define CST820_REG_TOUCH_POS    0x03
+#define CST820_REG_WAKE         0x15
+#define CST820_REG_ENABLE       0xFE
+
+// ============================================================================
+// CST820 I2C Helpers
+// ============================================================================
+
+static esp_err_t cst820_write_reg(uint8_t reg, uint8_t value)
+{
+    uint8_t buf[2] = { reg, value };
+    return i2c_master_write_to_device(
+        i2c_bus_get_port(), TOUCH_I2C_ADDR,
+        buf, sizeof(buf), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t cst820_read_regs(uint8_t reg, uint8_t *data, size_t len)
+{
+    return i2c_master_write_read_device(
+        i2c_bus_get_port(), TOUCH_I2C_ADDR,
+        &reg, 1, data, len, pdMS_TO_TICKS(100));
+}
+
+// ============================================================================
+// CST820 Polling Task (Core 0)
+// ============================================================================
+
+static void touch_task(void *pvParameters)
+{
+    (void)pvParameters;
+    ESP_LOGI(TAG, "CST820 touch task started on Core %d", xPortGetCoreID());
+
+    while (1) {
+        // Wake device — raw write of 0x01 to device (sets register pointer)
+        uint8_t wake = 0x01;
+        i2c_master_write_to_device(
+            i2c_bus_get_port(), TOUCH_I2C_ADDR,
+            &wake, 1, pdMS_TO_TICKS(100));
+
+        // Enable
+        cst820_write_reg(CST820_REG_ENABLE, 0x01);
+
+        // Read touch count
+        uint8_t touch_cnt = 0;
+        cst820_read_regs(CST820_REG_TOUCH_NUM, &touch_cnt, 1);
+        touch_cnt &= 0x0F;
+
+        if (touch_cnt == 0 || touch_cnt > 2) {
+            s_touch_state.pressed = false;
+            cst820_write_reg(CST820_REG_TOUCH_NUM, 0x00);
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+
+        // Acknowledge
+        cst820_write_reg(CST820_REG_TOUCH_POS, 0xAB);
+
+        // Read coordinates (6 bytes per touch point)
+        uint8_t buf[6];
+        cst820_read_regs(CST820_REG_TOUCH_POS, buf, 6);
+
+        // Acknowledge + clear
+        cst820_write_reg(CST820_REG_TOUCH_POS, 0xAB);
+        cst820_write_reg(CST820_REG_TOUCH_NUM, 0x00);
+
+        // Extract X/Y (12-bit, native 0-479 on this panel)
+        uint16_t x = ((uint16_t)(buf[0] & 0x0F) << 8) | buf[1];
+        uint16_t y = ((uint16_t)(buf[2] & 0x0F) << 8) | buf[3];
+
+        // Clamp to display bounds
+        if (x >= DISPLAY_WIDTH)  x = DISPLAY_WIDTH - 1;
+        if (y >= DISPLAY_HEIGHT) y = DISPLAY_HEIGHT - 1;
+
+        s_touch_state.x = (int16_t)x;
+        s_touch_state.y = (int16_t)y;
+        s_touch_state.pressed = true;
+
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+}
+
+// ============================================================================
+// CST820 Public API
+// ============================================================================
+
+esp_err_t touch_init(void)
+{
+    // Reset touch via TCA9554 EXIO2
+    tca9554_set_pin(EXIO_PIN_2, false);     // Reset LOW
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tca9554_set_pin(EXIO_PIN_2, true);      // Reset HIGH
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Wake device — raw write of 0x01 to device (sets register pointer)
+    uint8_t wake = 0x01;
+    esp_err_t ret = i2c_master_write_to_device(
+        i2c_bus_get_port(), TOUCH_I2C_ADDR,
+        &wake, 1, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "CST820 wake failed: %s (continuing)", esp_err_to_name(ret));
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Read chip ID
+    uint8_t chip_id = 0;
+    ret = cst820_read_regs(CST820_REG_CHIP_ID, &chip_id, 1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CST820 chip ID read failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "CST820 chip ID: 0x%02X", chip_id);
+
+    // Start touch polling task on Core 0
+    BaseType_t xRet = xTaskCreatePinnedToCore(
+        touch_task, "touch", 4096, NULL, 2, &s_touch_task_handle, 0);
+    if (xRet != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create touch task");
+        return ESP_FAIL;
+    }
+
+    // Register LVGL input device
+    if (!display_lock(1000)) {
+        ESP_LOGE(TAG, "Failed to acquire display lock for indev registration");
+        return ESP_FAIL;
+    }
+
+    lv_indev_drv_init(&s_indev_drv);
+    s_indev_drv.type = LV_INDEV_TYPE_POINTER;
+    s_indev_drv.read_cb = lvgl_touch_cb;
+
+    lv_indev_t *indev = lv_indev_drv_register(&s_indev_drv);
+    display_unlock();
+
+    if (indev == NULL) {
+        ESP_LOGE(TAG, "Failed to register LVGL input device");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "CST820 touch initialized (I2C 0x%02X, INT=%d)",
+             TOUCH_I2C_ADDR, TOUCH_INT_PIN);
+    return ESP_OK;
+}
+
+// Capacitive touch — no calibration needed
+bool touch_has_calibration(void) { return true; }
+esp_err_t touch_start_calibration(void) { return ESP_OK; }
+esp_err_t touch_clear_calibration(void) { return ESP_OK; }
+
+#else
+    #error "No touch type defined! Set TOUCH_TYPE_XPT2046 or TOUCH_TYPE_CST820 in device header"
+#endif

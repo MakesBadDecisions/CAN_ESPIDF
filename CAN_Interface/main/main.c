@@ -61,12 +61,39 @@ static void scan_task(void *arg)
         
         SYS_LOGI(TAG, "Vehicle scan starting...");
         
+        // Check CAN bus state before scanning
+        can_status_t can_st;
+        if (can_driver_get_status(&can_st) == ESP_OK &&
+            can_st.state != CAN_STATE_RUNNING) {
+            SYS_LOGW(TAG, "CAN bus not running (state=%d), attempting recovery...", can_st.state);
+            can_driver_clear_errors();
+            vTaskDelay(pdMS_TO_TICKS(200));
+            // Re-check
+            if (can_driver_get_status(&can_st) == ESP_OK &&
+                can_st.state != CAN_STATE_RUNNING) {
+                SYS_LOGE(TAG, "CAN bus still not running after recovery, scan failed");
+                comm_link_send_scan_status(SCAN_STATUS_FAILED, 0, 0);
+                s_scan_pending = false;
+                continue;
+            }
+        }
+        
         // Send scan in-progress status
         comm_link_send_scan_status(SCAN_STATUS_IN_PROGRESS, 0, 0);
+        
+        // Clear HW filters for discovery (accept all frames)
+        can_driver_clear_filters();
         
         // Build vehicle info
         comm_vehicle_info_t info;
         memset(&info, 0, sizeof(info));
+        
+        // Discover ECUs via physical addressing
+        diag_ecu_t ecus[8];
+        uint8_t ecu_count = 0;
+        diagnostics_scan_ecus(ecus, 8, &ecu_count);
+        info.ecu_count = ecu_count ? ecu_count : 1;
+        SYS_LOGI(TAG, "Discovered %u ECU(s)", ecu_count);
         
         // Read VIN
         esp_err_t ret = obd2_read_vin(info.vin, sizeof(info.vin));
@@ -110,11 +137,19 @@ static void scan_task(void *arg)
             }
         }
         
-        info.ecu_count = 1;  // TODO: detect multiple ECUs
         info.protocol = 6;  // ISO 15765-4 CAN
         info.dtc_count = 0; // TODO: read DTC count
         
         SYS_LOGI(TAG, "Scan complete: VIN=%.17s, %d PIDs supported", info.vin, pid_count);
+        
+        // Apply HW acceptance filters for discovered ECU response IDs
+        if (ecu_count > 0) {
+            uint32_t filter_ids[8];
+            for (uint8_t i = 0; i < ecu_count; i++) {
+                filter_ids[i] = ecus[i].ecu_id;
+            }
+            can_driver_set_filters(filter_ids, ecu_count);
+        }
         
         // Send vehicle info to Display
         comm_link_send_vehicle_info(&info);

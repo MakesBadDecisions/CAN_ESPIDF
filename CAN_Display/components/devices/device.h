@@ -6,9 +6,10 @@
  * Add -DDEVICE_<name> to platformio.ini build_flags to select.
  * 
  * Available devices:
- *   -DDEVICE_DIS06043H  -> 4.3" CrowPanel (recommended - has UART1 on GPIO17/18)
- *   -DDEVICE_DIS07050   -> 5.0" CrowPanel  
- *   -DDEVICE_DIS08070H  -> 7.0" CrowPanel
+ *   -DDEVICE_DIS06043H       -> 4.3" CrowPanel (recommended - has UART1 on GPIO17/18)
+ *   -DDEVICE_DIS07050        -> 5.0" CrowPanel  
+ *   -DDEVICE_DIS08070H       -> 7.0" CrowPanel
+ *   -DDEVICE_WS_TOUCH_LCD_21 -> 2.1" Waveshare Round (CST820 I2C touch, IMU, RTC, buzzer)
  */
 
 #pragma once
@@ -19,6 +20,8 @@
     #include "dis07050.h"
 #elif defined(DEVICE_DIS08070H)
     #include "dis08070h.h"
+#elif defined(DEVICE_WS_TOUCH_LCD_21)
+    #include "ws_touch_lcd_2_1.h"
 #else
     // Default to 4.3" if no device specified
     #warning "No device specified, defaulting to DIS06043H (4.3 inch)"

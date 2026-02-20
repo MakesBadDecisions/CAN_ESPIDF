@@ -29,9 +29,21 @@ The primary user interaction flow:
 
 4. **Session Logging**
    - Each session creates new CSV file on SD card
-   - File header includes: VIN, ECU IDs, timestamp, PID list
+   - File header includes: VIN, creation time, channel info (PID numbers, names, units)
    - Vehicle info from NVS included in every log file
-   - 20Hz logging rate for selected PIDs
+   - Logging rate matches poll rate (10Hz default)
+   - Hardware addon sensor data logged alongside CAN PIDs (when sensors connected)
+
+5. **Web Configuration Portal** (via WiFi AP)
+   - Connect phone/laptop to display's WiFi AP
+   - Full web UI for all system settings:
+     - Gauge layout, units, alerts, backlight
+     - CAN Interface settings (bitrate, controller, filters, poll rates)
+     - Extended poll list (poll more than displayed), custom PIDs, math channels
+     - Log file browsing and download
+     - DTC read/clear, freeze frames, ECU info
+     - Hardware addon setup (sensors, buzzers, RGB)
+     - Vehicle profiles (auto-detect by VIN)
 
 ## ui/ (SquareLine Studio Generated)
 
@@ -51,13 +63,15 @@ The primary user interaction flow:
 - [x] Handle unit selection change -- convert and display in selected unit
 - [x] Implement `pollCAN()` -- start/stop toggle, poll selected PID at 10Hz, update gauge via lv_timer
 - [x] Update `ui_gaugeText1` from comm_link PID store (periodic refresh)
-- [ ] Add status label for connection state (DISCONNECTED/CONNECTING/CONNECTED)
+- [x] Add status label for connection state (DISCONNECTED/CONNECTING/CONNECTED)
+- [x] Status label shows dual state: "UART: OK | CAN: OFF" with tri-color coding (green=both OK, yellow=partial, red=both down)
 - [x] Add VIN display area for vehicle identification (ui_vehicleInfoLabel1)
 - [x] Add multi-gauge layout screen with 4 configurable gauges (2x2 grid)
 - [x] Table-driven gauge_widget_t[] maps slot index to LVGL widget pointers
 - [x] Generic on_pid_changed / on_unit_changed callbacks (slot found by lv_event_get_target match)
 - [x] LVGL timer (100ms) calls gauge_engine_update() then pushes value_str to all gauge labels
-- [ ] Persist per-gauge PID and unit selections to NVS
+- [x] Persist per-gauge PID and unit selections to NVS
+- [x] Restore saved gauge config after scan -- sync dropdown selections to NVS state
 
 ## system/
 
@@ -85,15 +99,16 @@ The primary user interaction flow:
 - [x] Heartbeat send -- TX heartbeat every 500ms
 - [x] Heartbeat monitor -- track last RX timestamp, set disconnected flag after 2s timeout
 - [x] Connection status API -- `comm_link_get_state()`, `comm_link_get_stats()`
+- [x] CAN status API -- `comm_link_get_can_status()` parses heartbeat can_status field
 - [x] TX path -- send frames to CAN Interface Node over UART
 - [x] Metadata API -- get_pid_name, get_pid_unit_str, get_meta_pid_id, get_pid_meta_count
-- [ ] PID data store -- stale detection (mark entries not updated within timeout)
+- [x] PID data store -- stale detection (mark entries not updated within timeout)
 - [x] Send vehicle scan request -- MSG_CONFIG_CMD to trigger ECU/VIN/PID scan
 - [x] Handle scan response -- MSG_SCAN_STATUS with ECU IDs, VIN, supported PIDs + PID metadata
 - [x] Send poll list update -- MSG_CONFIG_CMD with selected PID list
-- [ ] Store vehicle info -- save VIN/ECU to NVS on successful scan
-- [ ] Load vehicle info -- recall saved VIN/ECU from NVS on boot
-- [ ] Callback registration -- notify UI when new PID data arrives
+- [x] Store vehicle info -- save VIN/ECU to NVS on successful scan (namespace "vehicle")
+- [x] Load vehicle info -- recall saved VIN/ECU from NVS on boot, show on display
+- [x] Callback registration -- notify UI when new PID data arrives (gauge_engine callback + LVGL timer)
 
 ## display_driver/
 
@@ -108,15 +123,16 @@ The primary user interaction flow:
 - [x] Device selection via compile-time `DEVICE_DIS*` define
 - [x] sdkconfig: 64B cache line, 80MHz PSRAM, ISR IRAM safe, SPIRAM fetch/rodata
 - [x] CrowPanel 4.3" (DIS06043H) -- 480x272 RGB LCD
+- [x] Waveshare 2.1" (WS_TOUCH_LCD_21) -- 480x480 ST7701S SPI+RGB, PWM backlight via LEDC
+- [x] Backlight PWM control -- LEDC peripheral for brightness adjustment (Waveshare)
 - [ ] CrowPanel 5" (DIS07050) -- 800x480 RGB LCD (untested)
 - [ ] CrowPanel 7" (DIS08070H) -- 800x480 RGB LCD (untested)
-- [ ] Backlight PWM control -- LEDC peripheral for brightness adjustment
 - [ ] Boot splash screen -- render CAN_ESPIDF logo during initialization
 
 ## touch_driver/
 
 - [x] XPT2046 SPI driver -- read X/Y/Z1 channels, 12-bit ADC
-- [x] SPI bus init -- SPI2_HOST, DMA disabled, 1MHz clock
+- [x] SPI bus init -- SPI2_HOST, DMA enabled (SPI_DMA_CH_AUTO), 1MHz clock, max_transfer_sz=4096 (shared with SD card)
 - [x] Touch polling task on Core 0 (Priority 2, 4KB stack)
 - [x] Volatile cache struct -- Core 0 writes, Core 1 reads (zero SPI in LVGL callback)
 - [x] LVGL input device registration (under display lock)
@@ -125,6 +141,8 @@ The primary user interaction flow:
 - [x] NVS persistence -- load/save calibration data (namespace "touch_cal")
 - [x] `touch_clear_calibration()` -- erase NVS, force recalibration
 - [x] Fallback to header defaults when no NVS data
+- [x] CST820 I2C capacitive touch backend (Waveshare) -- polling task, LVGL indev, TCA9554 reset
+- [x] Multi-controller HAL -- compile-time #if TOUCH_TYPE_XPT2046 / TOUCH_TYPE_CST820
 - [ ] Touch filtering -- debounce or median filter for noisy readings
 - [ ] Long-press detection for calibration re-entry from running UI
 
@@ -144,46 +162,139 @@ The primary user interaction flow:
 - [x] gauge_engine_rebuild_poll_list() -- re-aggregate after PID change during active polling
 - [x] Wired into main.c boot sequence (Phase 7)
 - [x] No LVGL dependency -- pure data manager
-- [ ] NVS persistence -- save/load per-slot PID and unit assignments
+- [x] NVS persistence -- save/load per-slot PID and unit assignments (namespace "gauge_cfg")
+- [x] Auto-save on set_pid / set_unit / clear_slot with suppress-save guard during load
 - [ ] Alert thresholds -- warning/critical limits per slot
 - [ ] Value smoothing -- low-pass filter or EMA for jittery readings
 - [ ] Gauge type renderers -- sweep dials, bar graphs (currently numeric-only via LVGL labels)
 
 ## data_logger/
 
-- [ ] SD card initialization -- SPI bus config using device header SD pins, mount FAT filesystem
-- [ ] SD card detection -- card detect or mount/unmount retry logic
-- [ ] Session management -- start session (create new CSV), stop session (flush and close)
-- [ ] Session auto-naming -- `LOG_YYYYMMDD_HHMMSS_NNN.csv` format
-- [ ] CSV header generation -- build header row from actively-polled PIDs
-- [ ] CSV row writing -- snapshot PID data store, format values, write row with timestamp
-- [ ] Write buffering -- RAM ring buffer, flush to SD every 50ms or on threshold
+- [x] SD card initialization -- SPI bus, FAT mount on shared SPI2_HOST with touch (DMA enabled)
+- [x] SD card initialization -- SDMMC 1-bit mount (Waveshare, TCA9554 D3 enable)
+- [x] Sequential file naming -- log1.csv, log2.csv... with NVS-persisted counter
+- [x] HP Tuners CSV header -- bracketed sections, channel info (PID numbers, names, units)
+- [x] Data row writing -- time offset + raw CAN values, empty fields for stale/missing
+- [x] Write buffering -- 4KB buffer, flushed on full or session stop
+- [x] Session auto-start/stop -- wired into pollCAN() start/stop in ui_events.c
+- [x] Row logging from PID callback -- logger_log_row() called on each new_data in gauge_update_cb
+- [x] Non-blocking mutex -- 5ms timeout, skip row rather than block LVGL
+- [x] Wired into main.c boot sequence (Phase 8, non-fatal on failure)
 - [ ] File rotation -- close and start new at configurable size limit
 - [ ] Storage monitoring -- track SD card free space, warn when low
+- [ ] File listing API -- enumerate log files for WiFi download
 
-## wifi_manager/
+## wifi_manager/ -- Web Configuration Portal
 
+The WiFi Manager is a full-featured configuration portal served over a WiFi AP.
+It is the primary settings hub for the entire system (both Display and CAN Interface).
+
+### Core Infrastructure
 - [ ] WiFi AP initialization -- configure SSID, password, channel
 - [ ] AP on-demand start -- enable AP via touch button or NVS setting
-- [ ] HTTP server -- lightweight httpd for file serving and API endpoints
+- [ ] HTTP server -- ESP-IDF httpd for REST API + static file serving
+- [ ] REST API framework -- JSON request/response, CORS, error handling
+- [ ] Web frontend -- HTML/CSS/JS served from SPIFFS or embedded in firmware
+- [ ] WebSocket support -- real-time live data push to browser (optional)
+
+### Data Logging & Files
 - [ ] Log file browser -- HTML page listing CSV files on SD card
 - [ ] Log file download -- serve CSV files for direct download
-- [ ] Gauge config UI -- HTML page for layout, PID assignments, alert thresholds
-- [ ] CAN node config proxy -- relay settings to CAN node over UART
-- [ ] System status page -- connection state, heap, SD usage
+- [ ] Log file delete -- remove old logs to free SD space
+- [ ] SD card status -- show used/free space, card info
+- [ ] Log session control -- start/stop logging from web UI
+
+### Display Node Configuration
+- [ ] Gauge layout config -- PID assignments, units, slot mapping
+- [ ] Alert thresholds -- warning/critical limits per gauge slot
+- [ ] Backlight / brightness control -- PWM level
+- [ ] Touch calibration -- trigger recalibration from web UI
+- [ ] Unit system preference -- default metric/imperial per vehicle profile
+- [ ] Display theme -- color schemes, gauge styles (future)
+
+### CAN Interface Configuration (proxied over UART)
+- [ ] CAN bitrate selection -- 125k/250k/500k/1M
+- [ ] CAN controller selection -- MCP2515/MCP2518FD/TWAI
+- [ ] Hardware filter configuration -- masks and filters
+- [ ] Poll rate / priority per PID -- priority 1-5 mapping
+- [ ] Extended poll list -- poll PIDs beyond what is displayed on gauges
+- [ ] Scan control -- trigger vehicle scan from web UI
+
+### Custom PIDs
+- [ ] Custom PID editor -- user-defined address, mode, name, byte count
+- [ ] Custom PID formula -- linear (A*x+B), bitfield, ratio, custom expression
+- [ ] Custom PID units -- user-specified unit string and conversion
+- [ ] Mode 0x22 manufacturer PIDs -- add/edit extended PID definitions
+- [ ] Import/export PID definitions -- JSON or CSV format
+
+### Custom Math Channels
+- [ ] Virtual channel editor -- derived from one or more real PIDs
+- [ ] Predefined templates -- HP from torque+RPM, AFR from lambda, etc.
+- [ ] Formula engine -- basic math operations on PID values
+- [ ] Virtual channels logged alongside real PIDs in CSV
+
+### System Status & Diagnostics
+- [ ] System status page -- connection state, heap, uptime, task info
+- [ ] DTC viewer -- read/display diagnostic trouble codes
+- [ ] DTC clear -- clear codes with confirmation gate
+- [ ] Freeze frame viewer -- show snapshot data for stored DTCs
+- [ ] ECU info display -- VIN, calibration IDs, ECU names
+- [ ] CAN bus statistics -- TX/RX counts, error rates, bus load
+
+### Vehicle Profiles
+- [ ] Save/load vehicle profiles -- per-VIN gauge configs and PID lists
+- [ ] Auto-detect vehicle -- match VIN to saved profile on connect
+- [ ] Profile export/import -- backup/restore via file download/upload
+
+### Hardware Addons
+- [ ] Sensor data integration -- BME/BMP (temp/humidity/pressure), gyro, QST attitude
+- [ ] Sensor channels in logger -- log addon sensor data alongside CAN PIDs
+- [ ] Sensor calibration/config -- offsets, orientation, sample rates
+- [ ] Buzzer control -- alert tones, configurable triggers
+- [ ] RGB LED control -- status indicators, alert colors, patterns
+- [ ] Addon enable/disable -- toggle hardware addons via web UI
 
 ## devices/
 
 - [x] Create DIS06043H (4.3") device header with pin assignments
 - [x] Create device.h selector header for build-time device selection
 - [x] Create custom board JSON for CrowPanel 4.3" (4MB Flash, 2MB Quad PSRAM)
+- [x] Create Waveshare ESP32-S3-Touch-LCD-2.1 device header (ws_touch_lcd_2_1.h)
+- [x] Create custom board JSON for Waveshare 2.1" (16MB Flash, 8MB Octal PSRAM)
+- [x] Create partitions_16mb.csv for 16MB flash boards
+- [x] Create sdkconfig.waveshare_2_1 (Octal PSRAM, 16MB flash)
 - [ ] Verify DIS07050 (5") device header pin assignments against actual hardware
 - [ ] Verify DIS08070H (7") device header pin assignments against actual hardware
+
+## i2c_bus/
+
+- [x] Shared I2C bus manager -- single init, port accessor, init guard
+- [x] Device-conditional compilation -- stub for boards without I2C peripherals
+- [x] Verified on Waveshare hardware (CST820, TCA9554, QMI8658 all respond)
+
+## tca9554/
+
+- [x] TCA9554 I2C GPIO expander driver -- init, set_pin, set_all, shadow register
+- [x] Pin mapping: EXIO1=LCD reset, EXIO2=touch reset, EXIO3=LCD SPI CS, EXIO4=SD D3, EXIO8=buzzer
+- [x] Stub implementation for boards without HAS_GPIO_EXPANDER
+- [x] Verified on Waveshare hardware (LCD/touch reset, SPI CS sequencing)
+
+## qmi8658/ -- 6-Axis IMU
+
+- [x] QMI8658 I2C driver -- init, chip ID verify, accel/gyro config
+- [x] Burst read API -- 14-byte read (temp + accel XYZ + gyro XYZ)
+- [x] Sensitivity tables -- auto-convert raw to G / DPS based on configured range
+- [x] Low-pass filter config -- accel LPF mode 0, gyro LPF mode 3
+- [x] Power management -- power_down / wake API
+- [x] Stub implementation for boards without HAS_IMU
+- [ ] IMU data integration into data logger -- additional CSV columns
+- [ ] IMU data as virtual PID channels in gauge_engine
+- [ ] Orientation detection -- portrait/landscape auto-rotate (if useful for round display)
 
 ## main/
 
 - [x] `main.c` -- app_main entry point with boot sequence
-- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link -> gauge_engine_init
+- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link -> gauge_engine_init -> logger_init
 - [x] `main.c` -- error handling for init failures (continue with degraded functionality)
 - [x] `main.c` -- gauge_engine_init() wired as Phase 7 after comm_link_start()
 - [x] `CMakeLists.txt` -- register all components
@@ -194,9 +305,14 @@ The primary user interaction flow:
 - [ ] Loopback test -- comm_link receives simulated UART messages, verify PID store updates
 - [ ] Display test -- render all gauge types with known values, visual verification
 - [ ] Touch test -- verify XPT2046 touch input and calibration accuracy
-- [ ] Logger test -- run logging session, verify CSV output matches HPTuners import format
+- [x] Logger test -- run logging session, verify CSV output matches HP Tuners import format
 - [ ] WiFi test -- connect to AP, browse logs, download file, verify file integrity
+- [ ] REST API test -- verify all endpoints return correct JSON for config read/write
+- [ ] Custom PID test -- create custom PID via web UI, verify polling and logging
+- [ ] Math channel test -- create virtual channel, verify formula output in gauges and log
 - [ ] Alert test -- inject out-of-range values, verify warning and critical alert behavior
-- [ ] Stress test -- sustained 20Hz PID updates across 30+ PIDs, verify no dropped data
+- [ ] Sensor test -- connect BME280, verify readings appear in data store and CSV
+- [ ] Buzzer test -- trigger alert condition, verify tone output
+- [ ] Stress test -- sustained 10Hz PID updates across 30+ PIDs, verify no dropped data
 - [ ] Endurance test -- 1-hour continuous logging, verify no file corruption or heap leak
-- [ ] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data
+- [x] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data

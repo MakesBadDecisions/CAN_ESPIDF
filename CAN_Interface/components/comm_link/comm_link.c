@@ -6,6 +6,7 @@
  */
 
 #include "comm_link.h"
+#include "can_driver.h"
 #include "system.h"
 #include "ESP32-S3-N16R8-DevKitC.h"
 #include "driver/uart.h"
@@ -469,9 +470,22 @@ esp_err_t comm_link_send_pid_batch(const comm_pid_value_t *values, uint8_t count
 
 esp_err_t comm_link_send_heartbeat(void)
 {
+    // Get real CAN bus status from driver
+    uint8_t can_st = 0;  // default: bus off
+    can_status_t can_drv;
+    if (can_driver_get_status(&can_drv) == ESP_OK) {
+        switch (can_drv.state) {
+            case CAN_STATE_RUNNING:       can_st = 1; break;  // bus on
+            case CAN_STATE_BUS_OFF:
+            case CAN_STATE_ERROR_PASSIVE:
+            case CAN_STATE_ERROR_WARNING: can_st = 2; break;  // error
+            default:                      can_st = 0; break;  // off
+        }
+    }
+
     comm_heartbeat_t hb = {
-        .node_state   = 1,  // scanning
-        .can_status   = 1,  // bus on (TODO: get from can_driver)
+        .node_state   = 1,
+        .can_status   = can_st,
         .free_heap_kb = (uint16_t)(esp_get_free_heap_size() / 1024),
         .uptime_ms    = (uint32_t)xTaskGetTickCount() * portTICK_PERIOD_MS,
     };

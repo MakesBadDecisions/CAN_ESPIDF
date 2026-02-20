@@ -2,7 +2,12 @@
  * @file display_driver.c
  * @brief Display Hardware Abstraction Layer Implementation
  *
- * Initializes ESP32-S3 RGB LCD panel and LVGL for CrowPanel displays.
+ * Initializes ESP32-S3 RGB LCD panel and LVGL for multiple display boards.
+ * Compile-time device selection via device.h provides pin/timing constants.
+ *
+ * Supported display boards:
+ *   - CrowPanel 4.3"/5"/7" (DIS06043H/DIS07050/DIS08070H): Direct GPIO backlight, simple RGB init
+ *   - Waveshare 2.1" Round (WS_TOUCH_LCD_21): ST7701S SPI init, TCA9554 reset/CS, PWM backlight
  *
  * Uses the Espressif-recommended anti-tearing approach:
  *   - Double framebuffer in PSRAM (num_fbs=2)
@@ -11,15 +16,11 @@
  *   - VSYNC-synced buffer swap: only swap on last flush, after VSYNC
  *   - Dirty area sync: copies invalidated regions to the other buffer
  *
- * This ensures DMA reads from FB-A while LVGL writes to FB-B.
- * They never access the same framebuffer simultaneously.
- * The dirty area copy keeps both buffers consistent so switching
- * between them never shows stale content.
- *
  * Touch input is handled by the separate touch_driver component.
  */
 
 #include "display_driver.h"
+#include "device.h"
 #include "esp_log.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
@@ -34,14 +35,10 @@
 #include "freertos/semphr.h"
 #include "lvgl.h"
 
-#if defined(DEVICE_DIS06043H)
-    #include "dis06043h.h"
-#elif defined(DEVICE_DIS07050H)
-    #include "dis07050h.h"
-#elif defined(DEVICE_DIS08070H)
-    #include "dis08070h.h"
-#else
-    #error "No device defined! Set DEVICE_DIS06043H, DEVICE_DIS07050H, or DEVICE_DIS08070H"
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+    #include "driver/spi_master.h"
+    #include "driver/ledc.h"
+    #include "tca9554.h"
 #endif
 
 static const char *TAG = "display";
@@ -132,10 +129,53 @@ static void lvgl_task(void *pvParameters)
 }
 
 // ============================================================================
-// Backlight Control
+// Backlight Control — device-specific
 // ============================================================================
 
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+
+// Waveshare 2.1": PWM backlight via LEDC on GPIO6
 static esp_err_t backlight_init(void)
+{
+    ledc_timer_config_t ledc_timer = {
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .freq_hz         = BL_PWM_FREQUENCY,
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .timer_num       = LEDC_TIMER_0,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    esp_err_t ret = ledc_timer_config(&ledc_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ledc_channel_config_t ledc_channel = {
+        .channel    = LEDC_CHANNEL_0,
+        .duty       = 0,
+        .gpio_num   = PIN_BACKLIGHT,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_sel  = LEDC_TIMER_0,
+    };
+    ret = ledc_channel_config(&ledc_channel);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Set default brightness (inverted curve from Waveshare demo)
+    uint32_t max_duty = (1 << 13) - 1;  // 8191
+    uint32_t duty = max_duty - 81 * (100 - BL_DEFAULT_BRIGHTNESS);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+
+    ESP_LOGI(TAG, "PWM backlight ON (GPIO %d, %d%%)", PIN_BACKLIGHT, BL_DEFAULT_BRIGHTNESS);
+    return ESP_OK;
+}
+
+#else
+
+// CrowPanel: Simple GPIO toggle backlight
 {
     uint64_t pin_mask = (1ULL << PIN_BACKLIGHT);
 #if PIN_PANEL_ENABLE >= 0
@@ -166,9 +206,176 @@ static esp_err_t backlight_init(void)
     return ESP_OK;
 }
 
+#endif // DEVICE_WS_TOUCH_LCD_21
+
 // ============================================================================
-// RGB Panel Initialization
+// ST7701S SPI Panel Init (Waveshare 2.1" only)
 // ============================================================================
+
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+
+// ST7701S init sequence — 9-bit SPI (1 cmd bit + 8 addr bits)
+// cmd=0 → register command, cmd=1 → register data
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[16];
+    uint8_t data_len;
+    uint16_t delay_ms;
+} st7701s_cmd_t;
+
+static const st7701s_cmd_t st7701s_init_cmds[] = {
+    // CMD2 BK0
+    {0xFF, {0x77, 0x01, 0x00, 0x00, 0x10}, 5, 0},
+    {0xC0, {0x3B, 0x00}, 2, 0},
+    {0xC1, {0x0B, 0x02}, 2, 0},
+    {0xC2, {0x07, 0x02}, 2, 0},
+    {0xCC, {0x10}, 1, 0},
+    {0xCD, {0x08}, 1, 0},
+    // Positive gamma
+    {0xB0, {0x00, 0x11, 0x16, 0x0e, 0x11, 0x06, 0x05, 0x09,
+            0x08, 0x21, 0x06, 0x13, 0x10, 0x29, 0x31, 0x18}, 16, 0},
+    // Negative gamma
+    {0xB1, {0x00, 0x11, 0x16, 0x0e, 0x11, 0x07, 0x05, 0x09,
+            0x09, 0x21, 0x05, 0x13, 0x11, 0x2a, 0x31, 0x18}, 16, 0},
+
+    // CMD2 BK1
+    {0xFF, {0x77, 0x01, 0x00, 0x00, 0x11}, 5, 0},
+    {0xB0, {0x6d}, 1, 0},
+    {0xB1, {0x37}, 1, 0},
+    {0xB2, {0x81}, 1, 0},
+    {0xB3, {0x80}, 1, 0},
+    {0xB5, {0x43}, 1, 0},
+    {0xB7, {0x85}, 1, 0},
+    {0xB8, {0x20}, 1, 0},
+    {0xC1, {0x78}, 1, 0},
+    {0xC2, {0x78}, 1, 0},
+    {0xD0, {0x88}, 1, 0},
+    // GIP timing
+    {0xE0, {0x00, 0x00, 0x02}, 3, 0},
+    {0xE1, {0x03, 0xA0, 0x00, 0x00, 0x04, 0xA0, 0x00, 0x00,
+            0x00, 0x20, 0x20}, 11, 0},
+    {0xE2, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00}, 13, 0},
+    {0xE3, {0x00, 0x00, 0x11, 0x00}, 4, 0},
+    {0xE4, {0x22, 0x00}, 2, 0},
+    {0xE5, {0x05, 0xEC, 0xA0, 0xA0, 0x07, 0xEE, 0xA0, 0xA0,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 16, 0},
+    {0xE6, {0x00, 0x00, 0x11, 0x00}, 4, 0},
+    {0xE7, {0x22, 0x00}, 2, 0},
+    {0xE8, {0x06, 0xED, 0xA0, 0xA0, 0x08, 0xEF, 0xA0, 0xA0,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 16, 0},
+    {0xEB, {0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00}, 7, 0},
+    {0xED, {0xFF, 0xFF, 0xFF, 0xBA, 0x0A, 0xBF, 0x45, 0xFF,
+            0xFF, 0x54, 0xFB, 0xA0, 0xAB, 0xFF, 0xFF, 0xFF}, 16, 0},
+    {0xEF, {0x10, 0x0D, 0x04, 0x08, 0x3F, 0x1F}, 6, 0},
+
+    // CMD2 BK3
+    {0xFF, {0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0},
+    {0xEF, {0x08}, 1, 0},
+
+    // Back to CMD1
+    {0xFF, {0x77, 0x01, 0x00, 0x00, 0x00}, 5, 0},
+    {0x36, {0x00}, 1, 0},      // MADCTL: no rotation
+    {0x3A, {0x66}, 1, 0},      // Pixel format: RGB666
+
+    // Sleep Out
+    {0x11, {0}, 0, 480},
+    // Display Inversion Off
+    {0x20, {0}, 0, 120},
+    // Display On
+    {0x29, {0}, 0, 0},
+};
+
+#define ST7701S_CMD_COUNT (sizeof(st7701s_init_cmds) / sizeof(st7701s_init_cmds[0]))
+
+static esp_err_t st7701s_spi_init(void)
+{
+    // Step 1: Reset LCD via TCA9554 EXIO1
+    tca9554_set_pin(EXIO_PIN_1, false);     // LCD Reset LOW
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tca9554_set_pin(EXIO_PIN_1, true);      // LCD Reset HIGH
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Step 2: Enable LCD SPI CS via TCA9554 EXIO3 (active LOW)
+    tca9554_set_pin(EXIO_PIN_3, true);      // CS HIGH first
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tca9554_set_pin(EXIO_PIN_3, false);     // CS LOW (active)
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Step 3: Init SPI bus for 9-bit ST7701S communication
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num   = LCD_SPI_MOSI,
+        .miso_io_num   = -1,
+        .sclk_io_num   = LCD_SPI_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 64,
+    };
+
+    esp_err_t ret = spi_bus_initialize(LCD_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LCD SPI bus init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // 9-bit SPI: 1 command bit (D/C) + 8 address bits
+    spi_device_interface_config_t dev_cfg = {
+        .clock_speed_hz = LCD_SPI_FREQ,
+        .mode           = 0,
+        .spics_io_num   = -1,      // CS via TCA9554
+        .queue_size     = 1,
+        .command_bits   = 1,        // D/C bit
+        .address_bits   = 8,        // Register address
+    };
+
+    spi_device_handle_t spi_dev;
+    ret = spi_bus_add_device(LCD_SPI_HOST, &dev_cfg, &spi_dev);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LCD SPI device add failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Step 4: Send ST7701S init commands
+    for (int i = 0; i < ST7701S_CMD_COUNT; i++) {
+        const st7701s_cmd_t *c = &st7701s_init_cmds[i];
+
+        // Write command (cmd bit = 0)
+        spi_transaction_t t = {
+            .rxlength = 0,
+            .length   = 0,
+            .cmd      = 0,          // command
+            .addr     = c->cmd,
+        };
+        spi_device_transmit(spi_dev, &t);
+
+        // Write data bytes (cmd bit = 1)
+        for (int j = 0; j < c->data_len; j++) {
+            spi_transaction_t dt = {
+                .rxlength = 0,
+                .length   = 0,
+                .cmd      = 1,      // data
+                .addr     = c->data[j],
+            };
+            spi_device_transmit(spi_dev, &dt);
+        }
+
+        if (c->delay_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(c->delay_ms));
+        }
+    }
+
+    // Step 5: Done with SPI — remove device and free bus
+    // (GPIO1/2 will be reused by SD card SDMMC later)
+    spi_bus_remove_device(spi_dev);
+    spi_bus_free(LCD_SPI_HOST);
+
+    ESP_LOGI(TAG, "ST7701S SPI init complete (%d commands)", ST7701S_CMD_COUNT);
+    return ESP_OK;
+}
+
+#endif // DEVICE_WS_TOUCH_LCD_21
 
 static esp_err_t rgb_panel_init(void)
 {
@@ -329,6 +536,15 @@ esp_err_t display_init(void)
 {
     esp_err_t ret;
 
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+    // Waveshare 2.1": ST7701S needs SPI register programming before RGB mode
+    ret = st7701s_spi_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ST7701S SPI init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+#endif
+
     ret = backlight_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Backlight init failed: %s", esp_err_to_name(ret));
@@ -339,6 +555,14 @@ esp_err_t display_init(void)
     if (ret != ESP_OK) {
         return ret;
     }
+
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+    // Disable LCD SPI CS after RGB panel is running
+    tca9554_set_pin(EXIO_PIN_3, false);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tca9554_set_pin(EXIO_PIN_3, true);
+    vTaskDelay(pdMS_TO_TICKS(50));
+#endif
 
     ret = lvgl_init();
     if (ret != ESP_OK) {
