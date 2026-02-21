@@ -19,89 +19,99 @@ Deliver robust, production-quality code with clear reasoning and minimal clutter
 
 ---
 
-# Session Handoff — IMU Integration (ALL COMPLETE)
+# Session Handoff — Settings Screen, Brightness, & Theme Color (ALL COMPLETE)
 
-## Completed Work
+## Completed Work (This Session)
 
-### 1. Virtual PID Infrastructure in gauge_engine (DONE)
-- `VPID_BASE (0xFF00)`, `VPID_IMU (0xFF00)`, `GAUGE_IS_VIRTUAL()` macro, `imu_display_mode_t` enum
-- 7 functions modified: set_pid, set_unit, build_pid_options, get_unit_options, update, rebuild_poll_list, load_config
-- NVS persistence, uniqueness enforcement, active count skips virtual PIDs
+### 1. Settings Screen (Screen2) from SquareLine Studio (DONE)
+- SquareLine Studio Screen2 exported with: brightness slider, back button, WiFi settings button, system panel, color wheel panel, settings button on Screen1
+- **SquareLine export damage fixed**: `ui_events.h` re-added `#include "lvgl.h"`, `settingsButton()`, `ui_events_post_init()` declarations; `ui/CMakeLists.txt` restored to `idf_component_register()` format with `ui_Screen2.c` added
 
-### 2. imu_display — Gauge Slot Rendering (DONE)
-- Attach/detach API, inner container (center 60%), dual mode (G-Load ±1.5G / Tilt ±30°)
-- Clean crosshair layout: axis-end labels only (lateral G right of H-axis, longitudinal G top of V-axis)
-- 10Hz LVGL timer reads qmi8658_get_orientation() volatile cache
+### 2. Brightness Slider + display_set_brightness API (DONE)
+- `display_driver.h`: Added `display_set_brightness(uint8_t percent)` and `display_get_brightness()` API
+- `display_driver.c` (Waveshare): GPIO config → LEDC timer → LEDC channel → `ledc_fade_func_install(0)` → NVS load → `display_set_brightness()`. Matches Waveshare demo `ST7701S.c` exactly.
+- `display_driver.c` (CrowPanel): GPIO on/off (percent > 0 = on, 0 = off)
+- Duty formula: `duty = 8191 - 81 * (100 - percent)`, special case: `percent == 0 → duty = 0`
+- NVS persistence: namespace `"display"`, key `"bl_pct"`, restored on boot
+- `ui_events.c`: `on_brightness_changed()` reads slider value → `display_set_brightness()` → updates label
 
-### 3. ui_events.c — IMU Wiring (DONE)
-- `gauge_widget_t` includes `gauge_panel` pointer
-- on_pid_changed: IMU attach/detach with uniqueness enforcement
-- on_unit_changed: mode switching via imu_display_set_mode()
-- NVS restore handles VPID_IMU slots
-- gauge_update_cb skips virtual PIDs (imu_display has own timer)
+### 3. SquareLine Screen Transition Fix (DONE)
+- **Root cause**: `ui_event_settingsButton` (SquareLine-generated) calls `_ui_screen_change()` but never calls `settingsButton()`. Screen change destroys/recreates Screen2 widgets.
+- **Fix 1**: Register `settingsButton` as additional `LV_EVENT_CLICKED` callback on `ui_settingsButton` in `ui_events_post_init()` — SquareLine-safe (never edits generated files)
+- **Fix 2**: `settingsButton()` uses deferred init via `lv_timer_create(settings_screen_deferred_init, 200, NULL)` + `lv_timer_set_repeat_count(t, 1)` — runs AFTER screen transition completes
+- Pattern documented for future: SquareLine event handlers run BEFORE `_ui_screen_change()` destroys/recreates the target screen
 
-### 4. Data Logger — IMU G-load Columns (DONE)
-- `data_logger.c`: Auto-detects IMU via `HAS_IMU` compile flag → `s_ctx.log_imu = true`
-- `write_header()`: Appends 2 IMU columns to HP Tuners CSV channel info rows
-  - PID numbers: 65280 (Lateral G), 65281 (Longitudinal G)
-  - Names: "Lateral G", "Longitudinal G" — Units: "G", "G"
-- `logger_log_row()`: Appends `orient.accel_lat` and `orient.accel_lon` after CAN PID values
-- CMakeLists: Added `qmi8658` to REQUIRES
-- No API change — logger_start() still takes CAN PIDs only, IMU columns auto-appended
+### 4. Color Wheel + Theme Color System (DONE)
+- Color wheel created dynamically inside `ui_colorWhellPanel` in `settings_screen_init_values()` (not in SquareLine — no re-export damage risk)
+- `lv_colorwheel_create(ui_colorWhellPanel, true)` with `lv_colorwheel_set_mode_fixed(true)`, auto-sized to fit panel
+- Hex label (#RRGGBB) centered inside wheel, updates on every drag
+- `on_colorwheel_changed()`: reads RGB → updates label → `ui_apply_theme_color()` → `ui_save_theme_color()`
+- **Saturation guard**: Saved colors with S < 20 (white/gray) are replaced with default blue — prevents invisible all-white arc
+- Default theme color: `0x34DB` (blue, ~#3498DB in RGB888)
+
+### 5. Theme Color Application (DONE)
+- `ui_apply_theme_color(uint16_t color_raw)`: Sets text color on all labels, border color on all buttons/panels/gauges/dropdowns across both screens
+- **Screen 1 themed**: gaugeText1-4, Label1-3, vehicleInfoLabel1, statusLabel1 (text); connectCAN, pollCAN1, settingsButton (borders); gauge1-4 (borders); all 8 dropdowns (text + borders)
+- **Screen 2 themed**: brightnessLabel, Label4, Label5 (text); backButton, wifiAPstartButton1 (borders); brightnessSlider (border); systemPanel, colorWhellPanel (borders)
+- Boot-time restore in `main.c` Phase 8: `ui_load_theme_color()` → `ui_apply_theme_color()` after `ui_events_post_init()`
+- Screen2 re-entry: `settings_screen_init_values()` reapplies theme to freshly created Screen2 widgets
+
+### 6. Theme Color NVS Persistence (DONE)
+- `ui_save_theme_color(uint16_t color_raw)`: `nvs_set_u16()` to namespace `"display"`, key `"theme"`
+- `ui_load_theme_color()`: `nvs_get_u16()`, defaults to `THEME_COLOR_DEFAULT` (0x34DB)
+- Saved on every colorwheel drag (VALUE_CHANGED event)
+- Restored at boot (main.c Phase 8) and on every Screen2 entry
+
+## Previously Completed Work
+
+### IMU Integration (ALL COMPLETE — previous session)
+- Virtual PID infrastructure: `VPID_BASE (0xFF00)`, `VPID_IMU`, `GAUGE_IS_VIRTUAL()` macro
+- imu_display: attach/detach API, dual mode (G-Load ±1.5G / Tilt ±30°), 10Hz timer
+- Data Logger: Lateral G + Longitudinal G columns auto-appended when HAS_IMU defined
+- ui_events.c: IMU wiring, uniqueness enforcement, NVS restore
+
+### Boot Splash from SD Card (DONE — previous session)
+- BMP decoder: 16/24/32 bpp, bottom-up/top-down, PSRAM RGB565
+- Configurable splash duration via NVS: namespace `"display"`, key `"splash_ms"`, default 3000ms
+- `boot_splash_show()` → `boot_splash_wait()` → `boot_splash_hide()`
+
+### WiFi Manager Design (DOCUMENTED — NOT YET IMPLEMENTED)
+- Full architecture in `wifi_manager/README.md`
+- QR code two-stage flow, APSTA mode, random password
+- API declared in `wifi_manager.h` (14 functions)
+- Reference: ToolTruck OTA implementation
 
 ## Architecture Notes
-- Virtual PID IDs: 0xFF00+ reserved. VPID_IMU = 0xFF00. Future virtual channels (GPS, etc.) get 0xFF01+
-- Display mode stored in `display_unit` field as cast int (0=G-Load, 1=Tilt) for VPID_IMU only
-- Only ONE gauge slot can host IMU (single sensor). UI enforces uniqueness.
-- Data logger IMU columns are independent of gauge slot IMU — always appended when HAS_IMU defined
-- CAN channel count in UI log message reflects CAN PIDs only (IMU channels are silent additions)
 
-## SquareLine Studio Notes
-- `ui_gyroPanel1` deleted from SquareLine — no longer referenced in code
-- After any SquareLine re-export: fix `ui_events.h` (re-add `#include "lvgl.h"` and `void ui_events_post_init(void);`)
+### NVS Namespaces
+| Namespace | Keys | Component |
+|-----------|------|-----------|
+| `imu_cal` | bias, R_matrix, valid | qmi8658 |
+| `gauge_cfg` | slot0..slot19 (pid_id + unit) | gauge_engine |
+| `vehicle` | vin, ecu_count | comm_link |
+| `touch_cal` | x_min, x_max, y_min, y_max, x_inv, y_inv | touch_driver |
+| `logger` | file_counter | data_logger |
+| `display` | `splash_ms`, `bl_pct`, `theme` | boot_splash, display_driver, ui_events |
+
+### SquareLine Studio Cautions
+After ANY SquareLine re-export, these files get overwritten and must be fixed:
+1. **`ui_events.h`**: Re-add `#include "lvgl.h"`, `void settingsButton(lv_event_t *e);`, `void ui_events_post_init(void);`, theme color function declarations
+2. **`ui/CMakeLists.txt`**: Restore `idf_component_register()` format (SquareLine replaces with raw CMake `add_library()`)
+3. **`ui_Screen1.c`**: SquareLine-generated `ui_event_settingsButton` never calls `settingsButton()` — our workaround in `ui_events_post_init()` registers it as a separate callback, so no edit needed here
+
+### Screen Transition Pattern
+- `_ui_screen_change(&ui_Screen2, ...)` destroys old Screen2 and calls `ui_Screen2_screen_init()` to recreate
+- Event handlers registered by SquareLine run BEFORE `_ui_screen_change()` in the same callback
+- **Solution**: Defer any widget manipulation with `lv_timer_create(callback, 200, NULL)` + `lv_timer_set_repeat_count(t, 1)`
+- Color wheel and brightness slider callbacks are re-registered every Screen2 visit (widgets are new objects)
+
+### Waveshare Backlight (from Waveshare demo ST7701S.c)
+- GPIO6 configured as output, then LEDC takes over (13-bit, 5kHz, LEDC_LOW_SPEED_MODE)
+- `ledc_fade_func_install(0)` required for reliable duty updates
+- Duty formula: `duty = 8191 - 81 * (100 - percent)`, `percent == 0 → duty = 0`
+- Active-high: higher duty = brighter
 
 ## What's Next (from TODO.md)
-1. **WiFi Manager** — Phase 1: WiFi AP + QR code + system status (see `wifi_manager/README.md`)
+1. **WiFi Manager** — Phase 1: WiFi AP + QR code + system status
 2. **Custom gauge types** — sweep dials, bar graphs, arc gauges
 3. **File rotation** — close + new log file at configurable size limit
-
-## WiFi Manager Design (DOCUMENTED — NOT YET IMPLEMENTED)
-
-### QR Code System (adapted from ToolTruck OTA)
-- Two-stage QR flow: WiFi QR on LCD → URL QR after client connects
-- `LV_USE_QRCODE` must be enabled in `lv_conf.h` (line 660, currently `0`)
-- WiFi QR format: `WIFI:T:WPA;S:<ssid>;P:<password>;;` — phones auto-connect
-- URL QR format: `http://192.168.4.1/` — shown after `WIFI_EVENT_AP_STACONNECTED`
-- Random 8-char password via `esp_random()`, unambiguous charset (no 0/O/o, 1/l/I)
-- SSID: `CAN_<MAC4>` by default (last 2 bytes of MAC), overridable via NVS
-- APSTA mode for future STA coexistence
-- Reference source: `C:\Users\TEOLA\Documents\Projects\ToolTruckESPIDF\main\ota\ota.c`
-
-### New Files for Phase 1
-- `wifi_ap.c` — SoftAP init, DHCP, WiFi event handler, random password
-- `qr_screen.c` — LVGL QR code screen (two stages), close button
-- `http_server.c` — httpd route registration
-- `status_handler.c` — GET /api/status JSON endpoint
-
-### Full API (wifi_manager.h — updated)
-- Lifecycle: `init()`, `start()`, `stop()`, `is_running()`
-- Credentials: `get_ssid()`, `get_password()`, `get_ip()`
-- QR data: `get_wifi_qr_data(buf, size)`, `get_url_qr_data(buf, size)`
-- Settings: `set_ssid()`, `set_password()`, `set_channel()`, `set_auto_start()`
-- Client tracking: `get_client_count()`
-
-## Recent: Boot Splash from SD Card (DONE)
-
-### boot_splash Component
-- `boot_splash.h/c`: BMP decoder + LVGL screen, loads `/sdcard/images/splash.bmp`
-- Supports 16-bit (RGB565), 24-bit (BGR888), 32-bit (BGRA8888) uncompressed BMP
-- Row-by-row decode into PSRAM RGB565 buffer, centered on black LVGL screen
-- `boot_splash_show()`: Read+decode+display — non-fatal on missing file (ESP_ERR_NOT_FOUND)
-- `boot_splash_hide()`: Delete LVGL screen + free PSRAM buffer
-
-### Boot Sequence Reorganized (main.c)
-- **Moved logger_init() up** to Phase 3 (after touch_init, before UI) — SD must be mounted for splash
-- Phase 3.5: `boot_splash_show()` — splash visible during phases 4-6
-- Phase 7: `ui_init()` loads main UI, replacing splash screen
-- Phase 7.5: `boot_splash_hide()` frees splash memory
-- Touch calibration (Phase 4) appears over splash on first boot

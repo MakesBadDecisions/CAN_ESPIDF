@@ -5930,8 +5930,7 @@
                 "InheritedType": 11
               }
             ],
-            "saved_objtypeKey": "PANEL",
-            "tree_closed": true
+            "saved_objtypeKey": "PANEL"
           },
           {
             "guid": "GUID45118861-211590S954551",
@@ -6522,7 +6521,7 @@
     "uiExportFolderPath": "C:\\Users\\TEOLA\\Documents\\Projects\\CAN_ESPIDF\\CAN_Display\\components\\ui",
     "projectExportFolderPath": "C:\\Users\\TEOLA\\Documents\\Projects\\CAN_ESPIDF\\CAN_Display\\components\\ui\\squareline",
     "custom_variable_prefix": "uic",
-    "backup_cnt": 136,
+    "backup_cnt": 174,
     "autosave_cnt": 0,
     "group_color_cnt": 0,
     "lvgl_version": "8.3.11",

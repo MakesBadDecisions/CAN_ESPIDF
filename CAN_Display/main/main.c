@@ -29,6 +29,7 @@
 #include "tca9554.h"
 #include "qmi8658.h"
 #include "boot_splash.h"
+#include "esp_heap_caps.h"
 
 void app_main(void)
 {
@@ -151,6 +152,12 @@ void app_main(void)
     // Phase 8: Create status label and start status polling timer
     if (display_lock(1000)) {
         ui_events_post_init();
+
+        // Apply saved theme color to all Screen1 widgets
+        uint16_t theme = ui_load_theme_color();
+        ui_apply_theme_color(theme);
+        SYS_LOGI("Theme color applied: 0x%04X", theme);
+
         display_unlock();
     }
 
@@ -158,18 +165,51 @@ void app_main(void)
     SYS_LOGI("Free heap: %lu bytes", (unsigned long)sys_get_free_heap());
     // TODO: Initialize wifi_manager (WiFi AP for config + log download)
 
-    // Main loop - periodic status
+    // Main loop - periodic heap + link status (60s interval for overnight monitoring)
+    uint32_t uptime_min = 0;
+    size_t initial_free = esp_get_free_heap_size();
+    size_t initial_free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    SYS_LOGI("HEAP baseline | internal free=%u min=%u | PSRAM free=%u min=%u",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        
-        // Log link status
-        const comm_link_stats_t *stats = comm_link_get_stats();
-        comm_link_state_t state = comm_link_get_state();
-        SYS_LOGD("Link: %s | rx=%lu tx=%lu pids=%lu err=%lu",
-                 state == COMM_LINK_CONNECTED ? "CONNECTED" : "DISCONNECTED",
-                 (unsigned long)stats->rx_frames,
-                 (unsigned long)stats->tx_frames,
-                 (unsigned long)stats->pid_updates,
-                 (unsigned long)stats->rx_errors);
+        vTaskDelay(pdMS_TO_TICKS(60000));  // 60s interval
+        uptime_min++;
+
+        size_t free_int  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t min_int   = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+        size_t free_ps   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        size_t min_ps    = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+
+        SYS_LOGI("HEAP [%lum] | int free=%u min=%u | PSRAM free=%u min=%u | total delta=%d",
+                 (unsigned long)uptime_min,
+                 free_int, min_int, free_ps, min_ps,
+                 (int)(initial_free - esp_get_free_heap_size()));
+
+        // Warn if internal heap watermark drops below 20KB
+        if (min_int < 20480) {
+            SYS_LOGW("LOW INTERNAL HEAP! min_ever=%u bytes", min_int);
+        }
+        // Warn if PSRAM watermark drops significantly
+        if (min_ps < (initial_free_psram / 2)) {
+            SYS_LOGW("PSRAM usage >50%%! min_ever=%u / initial=%u", min_ps, initial_free_psram);
+        }
+
+        // Log link status less frequently (every 5 min)
+        if (uptime_min % 5 == 0) {
+            const comm_link_stats_t *stats = comm_link_get_stats();
+            comm_link_state_t state = comm_link_get_state();
+            SYS_LOGI("Link [%lum]: %s | rx=%lu tx=%lu pids=%lu err=%lu",
+                     (unsigned long)uptime_min,
+                     state == COMM_LINK_CONNECTED ? "CONNECTED" : "DISCONNECTED",
+                     (unsigned long)stats->rx_frames,
+                     (unsigned long)stats->tx_frames,
+                     (unsigned long)stats->pid_updates,
+                     (unsigned long)stats->rx_errors);
+        }
     }
 }

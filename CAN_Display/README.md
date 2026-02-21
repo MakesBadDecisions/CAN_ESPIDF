@@ -45,9 +45,9 @@ The Waveshare board also includes onboard peripherals: TCA9554 GPIO expander, QM
 |-----------|-----------|---------|
 | comm_link | `components/comm_link/` | UART receive handler, message parsing, connection health monitoring, PID data store |
 | devices | `components/devices/` | Per-device pin definitions and hardware config for each display board |
-| display_driver | `components/display_driver/` | RGB parallel LCD driver, LVGL integration, double-FB anti-tearing, ST7701S SPI init, PWM backlight |
+| display_driver | `components/display_driver/` | RGB parallel LCD driver, LVGL integration, double-FB anti-tearing, ST7701S SPI init, PWM backlight, brightness API with NVS persistence |
 | touch_driver | `components/touch_driver/` | Touch input HAL — XPT2046 SPI resistive or CST820 I2C capacitive (compile-time selection) |
-| ui | `components/ui/` | SquareLine Studio generated LVGL screens and widgets |
+| ui | `components/ui/` | SquareLine Studio generated LVGL screens, widgets, and custom event logic (settings, theme coloring, brightness, colorwheel) |
 | gauge_engine | `components/gauge_engine/` | Gauge data manager -- per-slot PID assignment, unit conversion, poll list aggregation, NVS persistence |
 | data_logger | `components/data_logger/` | SD card CSV logging (SPI or SDMMC), session management, write buffering |
 | i2c_bus | `components/i2c_bus/` | Shared I2C bus manager for onboard peripherals (Waveshare) |
@@ -222,6 +222,7 @@ The actual boot sequence as implemented in `main.c`:
 
 1. display_init()
    - [Waveshare] ST7701S SPI init (39 commands), PWM backlight via LEDC
+     - Backlight NVS restore: loads brightness % from "display"/"bl_pct"
    - [CrowPanel] Backlight + panel enable GPIOs
    - Initialize RGB parallel LCD panel (double FB, bounce buffers, VSYNC)
    - Initialize LVGL (direct_mode, register display driver)
@@ -233,12 +234,18 @@ The actual boot sequence as implemented in `main.c`:
    - [Waveshare] TCA9554 touch reset, CST820 I2C wake, start polling task
    - Register LVGL input device
 
-3. Touch calibration check (resistive only)
-   - If no NVS calibration data: show 4-corner calibration screen
-   - Capacitive touch skips this (no calibration needed)
+3. logger_init()
+   - [CrowPanel] Mount SD card on SPI bus (FAT filesystem)
+   - [Waveshare] Mount SD card via SDMMC 1-bit (TCA9554 D3 enable)
+   - Non-fatal: continues without logging if SD card missing
 
-4. ui_init()
-   - Load SquareLine Studio generated UI screens
+3.5. boot_splash_show()
+   - Load /sdcard/images/splash.bmp → display during subsequent init phases
+   - Visible during phases 4-6
+
+4. Touch calibration check (resistive only)
+   - If no NVS calibration data: show 4-corner calibration screen over splash
+   - Capacitive touch skips this (no calibration needed)
 
 5. comm_link_init() + comm_link_start()
    - Initialize UART peripheral, start RX/TX tasks
@@ -246,16 +253,53 @@ The actual boot sequence as implemented in `main.c`:
 6. gauge_engine_init()
    - Zero all gauge slots, create mutex
 
-7. ui_events_post_init()
-   - Create status label and start status polling timer
+7. ui_init()
+   - Load SquareLine Studio generated UI screens (replaces splash)
+   - boot_splash_hide() — free PSRAM splash buffer
 
-8. logger_init()
-   - [CrowPanel] Mount SD card on SPI bus (FAT filesystem)
-   - [Waveshare] Mount SD card via SDMMC 1-bit (TCA9554 D3 enable)
-   - Non-fatal: continues without logging if SD card missing
+8. ui_events_post_init()
+   - Register settingsButton callback on ui_settingsButton (SquareLine-safe)
+   - Create status label and start status polling timer
+   - Load theme color from NVS ("display"/"theme")
+   - Apply theme color to all widgets on Screen1 (text + border colors)
 ```
 
 Non-critical failures (touch, SD card) are logged but do not halt boot.
+
+## NVS Namespaces
+
+All persistent settings are stored in ESP-IDF NVS (Non-Volatile Storage):
+
+| Namespace | Key | Type | Default | Component |
+|-----------|-----|------|---------|-----------|
+| `imu_cal` | `bias` | blob | — | qmi8658 (gyro bias vector) |
+| `imu_cal` | `R_matrix` | blob | — | qmi8658 (Rodrigues rotation) |
+| `imu_cal` | `valid` | u8 | 0 | qmi8658 (calibration flag) |
+| `gauge_cfg` | `slot0`..`slot19` | blob | — | gauge_engine (pid_id + unit per slot) |
+| `vehicle` | `vin` | str | "" | comm_link (last known VIN) |
+| `vehicle` | `ecu_count` | u8 | 0 | comm_link |
+| `touch_cal` | `x_min`, `x_max`, etc. | u16 | header defaults | touch_driver |
+| `logger` | `file_counter` | u32 | 0 | data_logger (sequential filename) |
+| `display` | `splash_ms` | u32 | 3000 | boot_splash (splash duration ms) |
+| `display` | `bl_pct` | u8 | 100 | display_driver (backlight brightness %) |
+| `display` | `theme` | u16 | 0x34DB | ui_events (theme color RGB565) |
+
+## Settings Screen (Screen2)
+
+The Settings Screen is accessed via the settings button on Screen1. It provides:
+
+- **Brightness Slider**: Adjusts PWM backlight (Waveshare) or GPIO on/off (CrowPanel). Value persisted to NVS immediately on change.
+- **Color Wheel**: Dynamic LVGL colorwheel for selecting theme color. Hex label (#RRGGBB) shows current color in the center. Saved to NVS on every drag.
+- **Theme Coloring**: Selected color is applied as text color to all labels and border color to all interactive widgets (buttons, panels, gauge borders, dropdowns) across both Screen1 and Screen2.
+- **WiFi AP Button**: Placeholder for WiFi Manager activation (not yet implemented).
+- **System Panel**: Placeholder for system info display.
+
+### SquareLine Integration Notes 
+
+- Screen2 widgets are destroyed and recreated on every screen transition (`_ui_screen_change()`)
+- All widget callbacks and color wheel creation are re-done on each Screen2 visit via `settings_screen_init_values()`
+- `settingsButton()` uses a deferred 200ms one-shot LVGL timer to wait for screen transition to complete
+- SquareLine's event handler for the settings button never calls `settingsButton()` — our code registers it separately in `ui_events_post_init()`
 
 ## Data Flow
 

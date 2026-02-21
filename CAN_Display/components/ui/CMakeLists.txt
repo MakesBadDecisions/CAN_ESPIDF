@@ -18,5 +18,6 @@ idf_component_register(
         data_logger
         display_driver
         imu_display
+        nvs_flash
         log
 )

@@ -11,6 +11,8 @@
 #include "pid_types.h"
 #include "imu_display.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "ui_Screen1.h"
 #include "ui_Screen2.h"
 #include <stdio.h>
@@ -22,6 +24,17 @@ static const char *TAG = "ui_events";
 static void settings_screen_deferred_init(lv_timer_t *timer);
 static void settings_screen_init_values(void);
 static void on_brightness_changed(lv_event_t *e);
+static void on_colorwheel_changed(lv_event_t *e);
+
+// Color wheel widget (created dynamically in ui_colorWhellPanel)
+static lv_obj_t *s_colorwheel = NULL;
+static lv_obj_t *s_colorwheel_label = NULL;
+
+// Default theme color: blue (RGB565 0x34DB ≈ RGB888 #3498DB)
+// Must be a saturated color — white/gray (S≈0) makes the colorwheel arc invisible
+#define THEME_COLOR_DEFAULT  0x34DB
+#define THEME_NVS_NAMESPACE  "display"
+#define THEME_NVS_KEY        "theme"
 
 // ============================================================================
 // Table-driven gauge widget mapping
@@ -583,6 +596,17 @@ void ui_events_post_init(void)
     s_last_can_status = 0;
     s_status_timer = lv_timer_create(status_timer_cb, 500, NULL);
 
+    // Register our own event callback on the Settings button so that
+    // settingsButton() gets called on tap. SquareLine Studio's generated
+    // ui_event_settingsButton only does _ui_screen_change — it never calls
+    // settingsButton(). This registration is SquareLine-safe because we
+    // never edit the generated ui_Screen1.c file.
+    if (ui_settingsButton) {
+        lv_obj_add_event_cb(ui_settingsButton, settingsButton,
+                            LV_EVENT_CLICKED, NULL);
+        ESP_LOGI(TAG, "Settings button callback registered");
+    }
+
     // IMU display initialized when user selects "IMU" in PID dropdown
     // (no longer tied to a fixed gyroPanel widget)
 
@@ -671,6 +695,69 @@ static void settings_screen_init_values(void)
                             LV_EVENT_VALUE_CHANGED, NULL);
     }
 
+    // Create color wheel inside ui_colorWhellPanel (recreated each visit)
+    s_colorwheel = NULL;
+    s_colorwheel_label = NULL;
+    if (ui_colorWhellPanel) {
+        // Get panel dimensions for sizing
+        lv_coord_t pw = lv_obj_get_content_width(ui_colorWhellPanel);
+        lv_coord_t ph = lv_obj_get_content_height(ui_colorWhellPanel);
+        lv_coord_t cw_size = (pw < ph ? pw : ph) - 10;  // fit inside with margin
+        if (cw_size < 60) cw_size = 60;
+
+        s_colorwheel = lv_colorwheel_create(ui_colorWhellPanel, true);
+        lv_obj_set_size(s_colorwheel, cw_size, cw_size);
+        lv_obj_set_align(s_colorwheel, LV_ALIGN_CENTER);
+        lv_colorwheel_set_mode_fixed(s_colorwheel, true);
+        lv_obj_set_style_arc_width(s_colorwheel, 15, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        // Hex label centered inside the wheel
+        s_colorwheel_label = lv_label_create(s_colorwheel);
+        lv_obj_set_width(s_colorwheel_label, LV_SIZE_CONTENT);
+        lv_obj_set_height(s_colorwheel_label, LV_SIZE_CONTENT);
+        lv_obj_set_align(s_colorwheel_label, LV_ALIGN_CENTER);
+
+        // Restore saved color to the wheel position.
+        // Guard: if saved color has near-zero saturation (white/gray), the
+        // colorwheel arc becomes invisible (all hues at S=0 are white).
+        // In that case, skip set_rgb and let the wheel use its built-in
+        // default (red, H=0 S=100 V=100) which shows the full spectrum.
+        uint16_t saved = ui_load_theme_color();
+        lv_color_t saved_color;
+        saved_color.full = saved;
+
+        // Convert to HSV to check saturation
+        lv_color_hsv_t hsv = lv_color_to_hsv(saved_color);
+        if (hsv.s >= 20) {
+            // Saturated enough — set the wheel to the saved color
+            lv_colorwheel_set_rgb(s_colorwheel, saved_color);
+        } else {
+            // Too desaturated — use a visible default so the wheel shows colors
+            saved_color.full = THEME_COLOR_DEFAULT;
+            lv_colorwheel_set_rgb(s_colorwheel, saved_color);
+            ESP_LOGW(TAG, "Saved color too desaturated (S=%d), using default", hsv.s);
+        }
+
+        // Set label text + color to match
+        uint8_t r = (saved_color.ch.red   << 3) | (saved_color.ch.red   >> 2);
+        uint8_t g = (saved_color.ch.green << 2) | (saved_color.ch.green >> 4);
+        uint8_t b = (saved_color.ch.blue  << 3) | (saved_color.ch.blue  >> 2);
+        static char hex_init[10];
+        snprintf(hex_init, sizeof(hex_init), "#%02X%02X%02X", r, g, b);
+        lv_label_set_text(s_colorwheel_label, hex_init);
+        lv_obj_set_style_text_color(s_colorwheel_label, saved_color,
+                                     LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        // Register callback (VALUE_CHANGED fires on every drag step)
+        lv_obj_add_event_cb(s_colorwheel, on_colorwheel_changed,
+                            LV_EVENT_VALUE_CHANGED, NULL);
+
+        ESP_LOGI(TAG, "Color wheel created (size=%d, saved=0x%04X)", cw_size, saved);
+    }
+
+    // Apply theme color to Screen2 widgets (just recreated by screen transition)
+    ui_apply_theme_color(ui_load_theme_color());
+
     ESP_LOGI(TAG, "Settings screen values initialized (brightness: %d%%)",
              display_get_brightness());
 }
@@ -694,6 +781,149 @@ static void on_brightness_changed(lv_event_t *e)
         snprintf(bl_text, sizeof(bl_text), "%d", (int)val);
         lv_label_set_text(ui_brightnessLabel, bl_text);
     }
+}
+
+// ============================================================================
+// Color Wheel — created inside ui_colorWhellPanel on Screen2
+// ============================================================================
+
+static void on_colorwheel_changed(lv_event_t *e)
+{
+    lv_obj_t *cw = lv_event_get_target(e);
+    lv_color_t color = lv_colorwheel_get_rgb(cw);
+
+    // Update hex label inside the wheel
+    if (s_colorwheel_label) {
+        static char hex_buf[10];
+        // Convert RGB565 to approximate RGB888 for display
+        uint8_t r = (color.ch.red   << 3) | (color.ch.red   >> 2);
+        uint8_t g = (color.ch.green << 2) | (color.ch.green >> 4);
+        uint8_t b = (color.ch.blue  << 3) | (color.ch.blue  >> 2);
+        snprintf(hex_buf, sizeof(hex_buf), "#%02X%02X%02X", r, g, b);
+        lv_label_set_text(s_colorwheel_label, hex_buf);
+        lv_obj_set_style_text_color(s_colorwheel_label, color,
+                                     LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // Apply to all themed widgets on both screens
+    ui_apply_theme_color(color.full);
+
+    // Persist to NVS
+    ui_save_theme_color(color.full);
+}
+
+// ============================================================================
+// Theme Color — apply to all text and border widgets across both screens
+// ============================================================================
+
+void ui_apply_theme_color(uint16_t color_raw)
+{
+    lv_color_t c;
+    c.full = color_raw;
+
+    // ---- Screen 1: Labels ----
+    // Gauge value labels
+    if (ui_gaugeText1) lv_obj_set_style_text_color(ui_gaugeText1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gaugeText2) lv_obj_set_style_text_color(ui_gaugeText2, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gaugeText3) lv_obj_set_style_text_color(ui_gaugeText3, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gaugeText4) lv_obj_set_style_text_color(ui_gaugeText4, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // Button labels
+    if (ui_Label1) lv_obj_set_style_text_color(ui_Label1, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Connect" label
+    if (ui_Label2) lv_obj_set_style_text_color(ui_Label2, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Poll" label
+    if (ui_Label3) lv_obj_set_style_text_color(ui_Label3, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Settings" label
+
+    // Info labels
+    if (ui_vehicleInfoLabel1) lv_obj_set_style_text_color(ui_vehicleInfoLabel1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_statusLabel1)      lv_obj_set_style_text_color(ui_statusLabel1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // ---- Screen 1: Button borders ----
+    if (ui_connectCAN) {
+        lv_obj_set_style_border_color(ui_connectCAN, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (ui_pollCAN1) {
+        lv_obj_set_style_border_color(ui_pollCAN1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (ui_settingsButton) {
+        lv_obj_set_style_border_color(ui_settingsButton, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // ---- Screen 1: Gauge panel borders ----
+    if (ui_gauge1) lv_obj_set_style_border_color(ui_gauge1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gauge2) lv_obj_set_style_border_color(ui_gauge2, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gauge3) lv_obj_set_style_border_color(ui_gauge3, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_gauge4) lv_obj_set_style_border_color(ui_gauge4, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // ---- Screen 1: Dropdown text + borders ----
+    lv_obj_t *dropdowns[] = {
+        ui_piddropdown1, ui_unitdropdown1,
+        ui_piddropdown2, ui_unitdropdown2,
+        ui_piddropdown3, ui_unitdropdown3,
+        ui_piddropdown4, ui_unitdropdown4,
+    };
+    for (int i = 0; i < 8; i++) {
+        if (dropdowns[i]) {
+            lv_obj_set_style_text_color(dropdowns[i], c, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(dropdowns[i], c, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+
+    // ---- Screen 2: Labels (only apply if Screen2 is active / widgets exist) ----
+    if (ui_brightnessLabel) lv_obj_set_style_text_color(ui_brightnessLabel, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (ui_Label4) lv_obj_set_style_text_color(ui_Label4, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Back" label
+    if (ui_Label5) lv_obj_set_style_text_color(ui_Label5, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "WiFi Settings" label
+
+    // ---- Screen 2: Button borders ----
+    if (ui_backButton) {
+        lv_obj_set_style_border_color(ui_backButton, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (ui_wifiAPstartButton1) {
+        lv_obj_set_style_border_color(ui_wifiAPstartButton1, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // ---- Screen 2: Slider border ----
+    if (ui_brightnessSlider) {
+        lv_obj_set_style_border_color(ui_brightnessSlider, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // ---- Screen 2: Panel borders ----
+    if (ui_systemPanel) {
+        lv_obj_set_style_border_color(ui_systemPanel, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(ui_systemPanel, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_opa(ui_systemPanel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (ui_colorWhellPanel) {
+        lv_obj_set_style_border_color(ui_colorWhellPanel, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(ui_colorWhellPanel, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_opa(ui_colorWhellPanel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    ESP_LOGD(TAG, "Theme color applied: 0x%04X", color_raw);
+}
+
+// ============================================================================
+// Theme Color — NVS persistence
+// ============================================================================
+
+void ui_save_theme_color(uint16_t color_raw)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(THEME_NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u16(nvs, THEME_NVS_KEY, color_raw);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+uint16_t ui_load_theme_color(void)
+{
+    uint16_t color = THEME_COLOR_DEFAULT;
+    nvs_handle_t nvs;
+    if (nvs_open(THEME_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u16(nvs, THEME_NVS_KEY, &color);
+        nvs_close(nvs);
+    }
+    return color;
 }
 
 // ============================================================================

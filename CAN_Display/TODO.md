@@ -72,6 +72,18 @@ The primary user interaction flow:
 - [x] LVGL timer (100ms) calls gauge_engine_update() then pushes value_str to all gauge labels
 - [x] Persist per-gauge PID and unit selections to NVS
 - [x] Restore saved gauge config after scan -- sync dropdown selections to NVS state
+- [x] Add Screen2 (Settings) -- SquareLine export with brightness slider, back button, WiFi button, system panel, color wheel panel
+- [x] Settings button callback -- registered as additional LV_EVENT_CLICKED in ui_events_post_init() (SquareLine-safe)
+- [x] Deferred Screen2 init -- 200ms one-shot LVGL timer waits for _ui_screen_change() to complete before manipulating widgets
+- [x] Brightness slider wired -- on_brightness_changed callback (LV_EVENT_VALUE_CHANGED) calls display_set_brightness()
+- [x] Brightness label update -- slider value reflected in ui_brightnessLabel text
+- [x] Color wheel -- created dynamically in ui_colorWhellPanel each Screen2 visit (not SquareLine-managed)
+- [x] Color wheel hex label -- #RRGGBB centered inside wheel, updates on drag
+- [x] Color wheel saturation guard -- saved colors with HSV S<20 (white/gray) replaced with default blue to prevent invisible arc
+- [x] Theme color application -- ui_apply_theme_color() sets text color on all labels, border color on all buttons/panels/gauges/dropdowns
+- [x] Theme color NVS persistence -- ui_save_theme_color()/ui_load_theme_color() in namespace "display" key "theme"
+- [x] Theme color boot restore -- main.c Phase 8 calls ui_load_theme_color() + ui_apply_theme_color() after ui_events_post_init()
+- [x] Theme color re-apply on Screen2 entry -- settings_screen_init_values() reapplies to freshly created Screen2 widgets
 
 ## system/
 
@@ -125,6 +137,10 @@ The primary user interaction flow:
 - [x] CrowPanel 4.3" (DIS06043H) -- 480x272 RGB LCD
 - [x] Waveshare 2.1" (WS_TOUCH_LCD_21) -- 480x480 ST7701S SPI+RGB, PWM backlight via LEDC
 - [x] Backlight PWM control -- LEDC peripheral for brightness adjustment (Waveshare)
+- [x] Brightness API -- display_set_brightness(uint8_t percent) and display_get_brightness()
+- [x] Brightness NVS persistence -- namespace "display" key "bl_pct", restored on boot
+- [x] Waveshare backlight init -- gpio_config → LEDC timer → LEDC channel → ledc_fade_func_install(0), matching demo ST7701S.c
+- [x] CrowPanel backlight -- GPIO on/off (percent > 0 = on, 0 = off)
 - [ ] CrowPanel 5" (DIS07050) -- 800x480 RGB LCD (untested)
 - [ ] CrowPanel 7" (DIS08070H) -- 800x480 RGB LCD (untested)
 - [x] Boot splash screen -- BMP loader renders SD card image during initialization
@@ -251,7 +267,7 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [ ] Freeze frame viewer -- snapshot data for stored DTCs
 - [ ] CAN bitrate change -- new CONFIG_CMD + CAN Interface handler
 - [ ] Vehicle profiles -- per-VIN gauge configs, auto-detect by VIN
-- [ ] Display themes -- LVGL style system, NVS-persisted
+- [x] Display themes -- basic theme coloring via colorwheel (text + border colors, NVS-persisted). Full LVGL style system is future scope.
 - [ ] WebSocket live data -- real-time push alternative to polling
 - [ ] Hardware addon config -- IMU cal, sensor offsets, buzzer/LED
 
@@ -328,7 +344,7 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 ## main/
 
 - [x] `main.c` -- app_main entry point with boot sequence
-- [x] `main.c` -- system_init -> display_init -> touch_init -> logger_init -> boot_splash -> comm_link -> gauge_engine -> ui_init -> boot_splash_hide -> ui_events_post_init
+- [x] `main.c` -- system_init -> display_init -> touch_init -> logger_init -> boot_splash -> comm_link -> gauge_engine -> ui_init -> boot_splash_hide -> ui_events_post_init -> theme_color_restore
 - [x] `main.c` -- error handling for init failures (continue with degraded functionality)
 - [x] `main.c` -- gauge_engine_init() wired as Phase 7 after comm_link_start()
 - [x] `CMakeLists.txt` -- register all components
@@ -347,8 +363,8 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [ ] Alert test -- inject out-of-range values, verify warning and critical alert behavior
 - [ ] Sensor test -- connect BME280, verify readings appear in data store and CSV
 - [ ] Buzzer test -- trigger alert condition, verify tone output
-- [ ] Stress test -- sustained 10Hz PID updates across 30+ PIDs, verify no dropped data
-- [ ] Endurance test -- 1-hour continuous logging, verify no file corruption or heap leak
+- [x] Stress test -- sustained 10Hz PID updates across 30+ PIDs, verify no dropped data
+- [x] Endurance test -- 10-hour overnight run: active CAN polling, UART streaming, LVGL rendering, SD logging. Zero heap delta, zero crashes, UI responsive throughout. (Feb 21, 2026)
 - [x] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data
 
 ---

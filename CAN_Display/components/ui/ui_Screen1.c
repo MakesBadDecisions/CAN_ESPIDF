@@ -136,7 +136,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_gaugeText1, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_gaugeText1, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_gaugeText1, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(ui_gaugeText1, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_gaugeText1, &lv_font_montserrat_44, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_vehicleInfoLabel1 = lv_label_create(ui_Screen1);
     lv_obj_set_width(ui_vehicleInfoLabel1, LV_SIZE_CONTENT);   /// 1
@@ -223,7 +223,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_gaugeText2, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_gaugeText2, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_gaugeText2, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(ui_gaugeText2, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_gaugeText2, &lv_font_montserrat_44, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_gauge3 = lv_obj_create(ui_Screen1);
     lv_obj_set_width(ui_gauge3, lv_pct(30));
@@ -276,7 +276,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_gaugeText3, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_gaugeText3, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_gaugeText3, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(ui_gaugeText3, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_gaugeText3, &lv_font_montserrat_44, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_gauge4 = lv_obj_create(ui_Screen1);
     lv_obj_set_width(ui_gauge4, lv_pct(30));
@@ -329,7 +329,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_gaugeText4, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_gaugeText4, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_gaugeText4, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(ui_gaugeText4, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_gaugeText4, &lv_font_montserrat_44, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_settingsButton = lv_btn_create(ui_Screen1);
     lv_obj_set_width(ui_settingsButton, lv_pct(20));

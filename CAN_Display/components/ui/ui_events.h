@@ -18,6 +18,11 @@ void settingsButton(lv_event_t * e);
 void wifiAPstart(lv_event_t * e);
 void ui_events_post_init(void);
 
+// Theme color system
+void ui_apply_theme_color(uint16_t color_raw);
+void ui_save_theme_color(uint16_t color_raw);
+uint16_t ui_load_theme_color(void);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

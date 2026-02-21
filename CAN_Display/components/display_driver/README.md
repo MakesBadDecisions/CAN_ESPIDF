@@ -97,10 +97,30 @@ void      display_clear(uint16_t color); // Set background color (RGB565)
 void      display_flush(void);           // No-op (LVGL auto-flushes)
 bool      display_lock(uint32_t ms);     // Acquire LVGL mutex
 void      display_unlock(void);          // Release LVGL mutex
+
+// Brightness control (Waveshare: PWM via LEDC, CrowPanel: GPIO on/off)
+esp_err_t display_set_brightness(uint8_t percent);  // Set backlight 0-100%
+uint8_t   display_get_brightness(void);              // Get current brightness %
 ```
 
 All LVGL API calls from outside the LVGL task must be wrapped in
 `display_lock()` / `display_unlock()`.
+
+### Brightness Control
+
+**Waveshare 2.1":** True PWM brightness via LEDC peripheral.
+- GPIO6 configured as output via `gpio_config()`, then LEDC takes over
+- LEDC: 13-bit resolution (8191 max duty), 5 kHz, `LEDC_LOW_SPEED_MODE`
+- `ledc_fade_func_install(0)` called during init (required for reliable updates)
+- Duty formula: `duty = 8191 - 81 * (100 - percent)`, special case `percent == 0 → duty = 0`
+- Init sequence matches Waveshare demo `ST7701S.c` exactly
+
+**CrowPanel 4.3":** GPIO-only backlight (on/off). `percent > 0` = GPIO high, `percent == 0` = GPIO low.
+
+**NVS Persistence:**
+- Namespace: `"display"`, Key: `"bl_pct"` (uint8)
+- Saved on every `display_set_brightness()` call
+- Restored during `backlight_init()` on boot (default: 100%)
 
 ## FreeRTOS Tasks
 
@@ -141,6 +161,7 @@ display_driver/
 
 - `esp_lcd` — RGB panel driver
 - `driver` — GPIO (backlight, panel enable), LEDC (PWM backlight)
+- `nvs_flash` — Brightness persistence (namespace "display", key "bl_pct")
 - `esp_timer`
 - `devices` — Pin definitions and timing parameters
 - `lvgl` — Graphics library

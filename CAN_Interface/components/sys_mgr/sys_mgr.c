@@ -8,6 +8,7 @@
 #include "can_driver.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
+#include "esp_heap_caps.h"
 #include "freertos/semphr.h"
 #include <string.h>
 
@@ -94,7 +95,7 @@ static void monitor_task_func(void *arg)
             }
         }
         
-        // Periodic status log (every 10 seconds)
+        // Periodic status log (every 10 seconds — debug level)
         if (s_mgr.stats.uptime_sec % 10 == 0) {
             SYS_LOGD(TAG, "[%s] up=%lus heap=%lu/%lu rx=%lu tx=%lu err=%lu",
                      sys_mgr_state_name(s_mgr.state),
@@ -104,6 +105,29 @@ static void monitor_task_func(void *arg)
                      (unsigned long)s_mgr.stats.can_frames_rx,
                      (unsigned long)s_mgr.stats.can_frames_tx,
                      (unsigned long)s_mgr.stats.error_count);
+        }
+
+        // Detailed heap log (every 60 seconds — info level, for overnight stability tests)
+        if (s_mgr.stats.uptime_sec % 60 == 0) {
+            static size_t s_initial_free = 0;
+            size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t min_internal  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+
+            if (s_initial_free == 0) {
+                s_initial_free = free_heap;
+            }
+
+            SYS_LOGI(TAG, "HEAP [%lum] | int free=%u min=%u | total free=%lu delta=%d | rx=%lu tx=%lu",
+                     (unsigned long)(s_mgr.stats.uptime_sec / 60),
+                     free_internal, min_internal,
+                     (unsigned long)free_heap,
+                     (int)(s_initial_free - free_heap),
+                     (unsigned long)s_mgr.stats.can_frames_rx,
+                     (unsigned long)s_mgr.stats.can_frames_tx);
+
+            if (min_internal < 20480) {
+                SYS_LOGW(TAG, "LOW INTERNAL HEAP! min_ever=%u bytes", min_internal);
+            }
         }
     }
 }
