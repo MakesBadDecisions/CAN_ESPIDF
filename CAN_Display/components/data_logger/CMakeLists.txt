@@ -5,5 +5,5 @@
 idf_component_register(
     SRCS "data_logger.c"
     INCLUDE_DIRS "."
-    REQUIRES fatfs sdmmc comm_link system devices driver nvs_flash tca9554
+    REQUIRES fatfs sdmmc comm_link system devices driver nvs_flash tca9554 qmi8658
 )

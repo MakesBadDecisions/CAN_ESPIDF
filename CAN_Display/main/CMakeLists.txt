@@ -7,6 +7,7 @@ idf_component_register(
         touch_driver
         gauge_engine
         data_logger
+        boot_splash
         wifi_manager
         system
         lvgl

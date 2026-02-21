@@ -28,6 +28,8 @@
 #include "esp_lcd_panel_rgb.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <string.h>
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
@@ -53,6 +55,9 @@ static lv_disp_drv_t s_disp_drv;
 static SemaphoreHandle_t s_lvgl_mutex = NULL;
 static SemaphoreHandle_t s_vsync_sem = NULL;
 static TaskHandle_t s_lvgl_task_handle = NULL;
+
+// Current backlight brightness (0-100%)
+static uint8_t s_brightness = 0;
 
 // ============================================================================
 // VSYNC Callback — signals when frame transmission is complete (ISR context)
@@ -135,8 +140,17 @@ static void lvgl_task(void *pvParameters)
 #if defined(DEVICE_WS_TOUCH_LCD_21)
 
 // Waveshare 2.1": PWM backlight via LEDC on GPIO6
+// Matches Waveshare demo: gpio_config → ledc_timer → ledc_channel → fade_install → Set_Backlight
 static esp_err_t backlight_init(void)
 {
+    // Step 1: Configure backlight GPIO as output (matches Waveshare demo)
+    gpio_config_t bk_gpio_config = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = 1ULL << PIN_BACKLIGHT,
+    };
+    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
+
+    // Step 2: LEDC timer
     ledc_timer_config_t ledc_timer = {
         .duty_resolution = LEDC_TIMER_13_BIT,
         .freq_hz         = BL_PWM_FREQUENCY,
@@ -150,6 +164,7 @@ static esp_err_t backlight_init(void)
         return ret;
     }
 
+    // Step 3: LEDC channel
     ledc_channel_config_t ledc_channel = {
         .channel    = LEDC_CHANNEL_0,
         .duty       = 0,
@@ -163,19 +178,32 @@ static esp_err_t backlight_init(void)
         return ret;
     }
 
-    // Set default brightness (inverted curve from Waveshare demo)
-    uint32_t max_duty = (1 << 13) - 1;  // 8191
-    uint32_t duty = max_duty - 81 * (100 - BL_DEFAULT_BRIGHTNESS);
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    // Step 4: Install LEDC fade ISR (required for reliable duty updates)
+    ledc_fade_func_install(0);
 
-    ESP_LOGI(TAG, "PWM backlight ON (GPIO %d, %d%%)", PIN_BACKLIGHT, BL_DEFAULT_BRIGHTNESS);
+    // Load saved brightness from NVS, fall back to compiled default
+    uint8_t saved_pct = BL_DEFAULT_BRIGHTNESS;
+    nvs_handle_t nvs;
+    if (nvs_open("display", NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t val;
+        if (nvs_get_u8(nvs, "bl_pct", &val) == ESP_OK) {
+            saved_pct = val;
+        }
+        nvs_close(nvs);
+    }
+
+    // Apply initial brightness via the same path as runtime changes
+    s_brightness = saved_pct;
+    display_set_brightness(saved_pct);
+
+    ESP_LOGI(TAG, "PWM backlight ON (GPIO %d, %d%%)", PIN_BACKLIGHT, saved_pct);
     return ESP_OK;
 }
 
 #else
 
 // CrowPanel: Simple GPIO toggle backlight
+static esp_err_t backlight_init(void)
 {
     uint64_t pin_mask = (1ULL << PIN_BACKLIGHT);
 #if PIN_PANEL_ENABLE >= 0
@@ -202,11 +230,53 @@ static esp_err_t backlight_init(void)
     ESP_LOGI(TAG, "Backlight ON");
 #endif
     gpio_set_level(PIN_BACKLIGHT, 1);
+    s_brightness = 100;
 
     return ESP_OK;
 }
 
 #endif // DEVICE_WS_TOUCH_LCD_21
+
+// ============================================================================
+// Brightness Control — public API
+// ============================================================================
+
+esp_err_t display_set_brightness(uint8_t percent)
+{
+    if (percent > 100) percent = 100;
+
+#if defined(DEVICE_WS_TOUCH_LCD_21)
+    // Waveshare: PWM via LEDC (formula from Waveshare demo ST7701S.c)
+    // Duty = LEDC_MAX_Duty - 81 * (Backlight_MAX - Light); if Light==0 → Duty=0
+    uint32_t max_duty = (1 << 13) - 1;  // 8191
+    uint32_t duty = max_duty - 81 * (100 - percent);
+    if (percent == 0) duty = 0;
+    ESP_LOGI(TAG, "LEDC duty=%lu (percent=%d)", (unsigned long)duty, percent);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+#else
+    // CrowPanel: GPIO on/off only
+    gpio_set_level(PIN_BACKLIGHT, percent > 0 ? 1 : 0);
+#endif
+
+    s_brightness = percent;
+
+    // Persist to NVS
+    nvs_handle_t nvs;
+    if (nvs_open("display", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, "bl_pct", percent);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+
+    ESP_LOGI(TAG, "Brightness set to %d%%", percent);
+    return ESP_OK;
+}
+
+uint8_t display_get_brightness(void)
+{
+    return s_brightness;
+}
 
 // ============================================================================
 // ST7701S SPI Panel Init (Waveshare 2.1" only)

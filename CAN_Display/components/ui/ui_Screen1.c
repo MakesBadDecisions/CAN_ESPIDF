@@ -28,7 +28,8 @@ lv_obj_t * ui_gauge4 = NULL;
 lv_obj_t * ui_piddropdown4 = NULL;
 lv_obj_t * ui_unitdropdown4 = NULL;
 lv_obj_t * ui_gaugeText4 = NULL;
-lv_obj_t * ui_gyroPanel1 = NULL;
+lv_obj_t * ui_settingsButton = NULL;
+lv_obj_t * ui_Label3 = NULL;
 // event funtions
 void ui_event_connectCAN(lv_event_t * e)
 {
@@ -45,6 +46,15 @@ void ui_event_pollCAN1(lv_event_t * e)
 
     if(event_code == LV_EVENT_CLICKED) {
         pollCAN(e);
+    }
+}
+
+void ui_event_settingsButton(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+
+    if(event_code == LV_EVENT_CLICKED) {
+        _ui_screen_change(&ui_Screen2, LV_SCR_LOAD_ANIM_NONE, 100, 0, &ui_Screen2_screen_init);
     }
 }
 
@@ -132,7 +142,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_width(ui_vehicleInfoLabel1, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_vehicleInfoLabel1, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_x(ui_vehicleInfoLabel1, lv_pct(0));
-    lv_obj_set_y(ui_vehicleInfoLabel1, lv_pct(11));
+    lv_obj_set_y(ui_vehicleInfoLabel1, lv_pct(10));
     lv_obj_set_align(ui_vehicleInfoLabel1, LV_ALIGN_TOP_MID);
     lv_label_set_text(ui_vehicleInfoLabel1, "Vehicle Info");
 
@@ -321,21 +331,29 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_align(ui_gaugeText4, LV_ALIGN_CENTER);
     lv_obj_set_style_text_font(ui_gaugeText4, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_gyroPanel1 = lv_obj_create(ui_Screen1);
-    lv_obj_set_width(ui_gyroPanel1, lv_pct(15));
-    lv_obj_set_height(ui_gyroPanel1, lv_pct(15));
-    lv_obj_set_x(ui_gyroPanel1, lv_pct(4));
-    lv_obj_set_y(ui_gyroPanel1, lv_pct(13));
-    lv_obj_set_align(ui_gyroPanel1, LV_ALIGN_LEFT_MID);
-    lv_obj_clear_flag(ui_gyroPanel1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_gyroPanel1, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_gyroPanel1, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(ui_gyroPanel1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_opa(ui_gyroPanel1, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(ui_gyroPanel1, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    ui_settingsButton = lv_btn_create(ui_Screen1);
+    lv_obj_set_width(ui_settingsButton, lv_pct(20));
+    lv_obj_set_height(ui_settingsButton, lv_pct(5));
+    lv_obj_set_x(ui_settingsButton, lv_pct(0));
+    lv_obj_set_y(ui_settingsButton, lv_pct(3));
+    lv_obj_set_align(ui_settingsButton, LV_ALIGN_TOP_MID);
+    lv_obj_add_flag(ui_settingsButton, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_settingsButton, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_bg_color(ui_settingsButton, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_settingsButton, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(ui_settingsButton, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_opa(ui_settingsButton, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(ui_settingsButton, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_Label3 = lv_label_create(ui_settingsButton);
+    lv_obj_set_width(ui_Label3, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_Label3, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_Label3, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_Label3, "Settings");
 
     lv_obj_add_event_cb(ui_connectCAN, ui_event_connectCAN, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_pollCAN1, ui_event_pollCAN1, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(ui_settingsButton, ui_event_settingsButton, LV_EVENT_ALL, NULL);
 
 }
 
@@ -367,6 +385,7 @@ void ui_Screen1_screen_destroy(void)
     ui_piddropdown4 = NULL;
     ui_unitdropdown4 = NULL;
     ui_gaugeText4 = NULL;
-    ui_gyroPanel1 = NULL;
+    ui_settingsButton = NULL;
+    ui_Label3 = NULL;
 
 }

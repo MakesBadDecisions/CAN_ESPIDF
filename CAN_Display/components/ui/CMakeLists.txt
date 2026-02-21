@@ -7,6 +7,7 @@ idf_component_register(
         "ui_helpers.c"
         "ui_events.c"
         "ui_Screen1.c"
+        "ui_Screen2.c"
         "ui_comp_hook.c"
     INCLUDE_DIRS
         "."
@@ -16,5 +17,6 @@ idf_component_register(
         gauge_engine
         data_logger
         display_driver
+        imu_display
         log
 )

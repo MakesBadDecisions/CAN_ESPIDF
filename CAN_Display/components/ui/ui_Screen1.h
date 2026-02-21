@@ -38,7 +38,9 @@ extern lv_obj_t * ui_gauge4;
 extern lv_obj_t * ui_piddropdown4;
 extern lv_obj_t * ui_unitdropdown4;
 extern lv_obj_t * ui_gaugeText4;
-extern lv_obj_t * ui_gyroPanel1;
+extern void ui_event_settingsButton(lv_event_t * e);
+extern lv_obj_t * ui_settingsButton;
+extern lv_obj_t * ui_Label3;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

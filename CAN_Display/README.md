@@ -52,7 +52,8 @@ The Waveshare board also includes onboard peripherals: TCA9554 GPIO expander, QM
 | data_logger | `components/data_logger/` | SD card CSV logging (SPI or SDMMC), session management, write buffering |
 | i2c_bus | `components/i2c_bus/` | Shared I2C bus manager for onboard peripherals (Waveshare) |
 | tca9554 | `components/tca9554/` | TCA9554 I2C GPIO expander — LCD/touch reset, SPI CS, SD D3, buzzer |
-| qmi8658 | `components/qmi8658/` | QMI8658 6-axis IMU — accelerometer + gyroscope on I2C |
+| qmi8658 | `components/qmi8658/` | QMI8658 6-axis IMU — accel + gyro, orientation fusion, NVS calibration |
+| imu_display | `components/imu_display/` | IMU bubble visualization — pitch/roll dot + G-force labels in LVGL panel |
 | wifi_manager | `components/wifi_manager/` | WiFi AP, HTTP server, REST API, full web config portal |
 | system | `components/system/` | Logging wrapper, NVS init, timing utilities |
 
@@ -92,7 +93,8 @@ CAN_Display/
     ├── data_logger/        # SD card CSV logging (SPI or SDMMC)
     ├── i2c_bus/            # Shared I2C bus manager
     ├── tca9554/            # TCA9554 GPIO expander driver
-    ├── qmi8658/            # QMI8658 6-axis IMU driver
+    ├── qmi8658/            # QMI8658 6-axis IMU driver (fusion, NVS cal)
+    ├── imu_display/        # IMU bubble visualization for LVGL
     ├── wifi_manager/       # WiFi AP, REST API, web config portal
     ├── system/             # Logging, NVS, timing
     └── lvgl/               # LVGL v8.3 library
@@ -107,6 +109,7 @@ Tasks currently running in the firmware:
 | `lvgl` | 1 | 3 | 16 KB | LVGL timer handler (rendering + input processing) |
 | `touch` | 0 | 2 | 4 KB | Touch polling (XPT2046 SPI or CST820 I2C), writes to volatile cache |
 | `comm_rx` | 0 | 4 | 4 KB | UART RX from CAN Interface Node |
+| `imu_task` | 0 | 3 | 4 KB | IMU polling (50Hz), orientation fusion, calibration |
 
 Core 1 is dedicated to display rendering (LVGL + LCD bounce buffer DMA ISR).
 Touch reads are isolated on Core 0 to prevent stalling the LCD DMA ISR.
@@ -213,6 +216,9 @@ The actual boot sequence as implemented in `main.c`:
    - i2c_bus_init() — shared I2C bus for touch, GPIO expander, IMU, RTC
    - tca9554_init() — GPIO expander (LCD/touch reset, SPI CS, SD D3)
    - qmi8658_init() — 6-axis IMU (non-fatal if not present)
+   - qmi8658_start_task() — background polling + orientation fusion
+     - Loads saved calibration from NVS, or performs 2s live calibration
+     - Saves new calibration to NVS on completion
 
 1. display_init()
    - [Waveshare] ST7701S SPI init (39 commands), PWM backlight via LEDC

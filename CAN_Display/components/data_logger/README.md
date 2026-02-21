@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Logs PID data to SD card in HP Tuners-compatible CSV format. Automatically starts logging when polling begins and stops when polling ends. Raw CAN values are logged directly — no unit conversion.
+Logs PID data to SD card in HP Tuners-compatible CSV format. Automatically starts logging when polling begins and stops when polling ends. Raw CAN values are logged directly — no unit conversion. When built with `HAS_IMU`, two additional columns (Lateral G, Longitudinal G) are automatically appended after CAN PID columns.
 
 ## Status: WORKING
 
@@ -41,8 +41,8 @@ s,°C,%,km/h,°C
 ### Header Sections
 - **Log Information**: Creation time (elapsed since boot)
 - **Vehicle Information**: VIN from comm_link (stored in NVS)
-- **Channel Information**: 3 rows — PID numbers (decimal), names from pid_db, units from pid_db
-- **Channel Data**: Time offset (seconds, 3dp) + raw values per poll cycle
+- **Channel Information**: 3 rows — PID numbers (decimal), names from pid_db, units from pid_db. When HAS_IMU is defined, appends PID 65280 (Lateral G) and 65281 (Longitudinal G) with "G" units.
+- **Channel Data**: Time offset (seconds, 3dp) + raw values per poll cycle. IMU columns appended with `%.4f` precision.
 
 ### Data Rows
 - First column: time offset from session start (seconds, millisecond resolution)
@@ -153,3 +153,4 @@ data_logger/
 - `driver` — GPIO/SPI driver
 - `nvs_flash` — File sequence number persistence
 - `tca9554` — SD D3 enable on Waveshare (via EXIO4)
+- `qmi8658` — IMU orientation data for G-load columns (optional, HAS_IMU guarded)

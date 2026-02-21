@@ -198,7 +198,7 @@
 
 #define QMI8658_ACCEL_RANGE     4       // ±4G default
 #define QMI8658_ACCEL_ODR       8000    // 8000 Hz
-#define QMI8658_GYRO_RANGE      64      // ±64 DPS default
+#define QMI8658_GYRO_RANGE      512     // ±512 DPS (64 clips on normal movement)
 #define QMI8658_GYRO_ODR        8000    // 8000 Hz
 
 // ============================================================================

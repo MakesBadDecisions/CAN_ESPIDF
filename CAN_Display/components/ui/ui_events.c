@@ -9,12 +9,19 @@
 #include "gauge_engine.h"
 #include "data_logger.h"
 #include "pid_types.h"
+#include "imu_display.h"
 #include "esp_log.h"
 #include "ui_Screen1.h"
+#include "ui_Screen2.h"
 #include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "ui_events";
+
+// Forward declarations for static helpers
+static void settings_screen_deferred_init(lv_timer_t *timer);
+static void settings_screen_init_values(void);
+static void on_brightness_changed(lv_event_t *e);
 
 // ============================================================================
 // Table-driven gauge widget mapping
@@ -24,6 +31,7 @@ static const char *TAG = "ui_events";
 // ============================================================================
 
 typedef struct {
+    lv_obj_t **gauge_panel;     // Parent panel (for IMU display attachment)
     lv_obj_t **pid_dropdown;    // PID selector
     lv_obj_t **unit_dropdown;   // Unit selector
     lv_obj_t **value_label;     // Numeric value text
@@ -31,10 +39,10 @@ typedef struct {
 
 // Screen1 has 4 gauges -- just extend this array for more
 static const gauge_widget_t s_gauge_widgets[] = {
-    { &ui_piddropdown1, &ui_unitdropdown1, &ui_gaugeText1 },
-    { &ui_piddropdown2, &ui_unitdropdown2, &ui_gaugeText2 },
-    { &ui_piddropdown3, &ui_unitdropdown3, &ui_gaugeText3 },
-    { &ui_piddropdown4, &ui_unitdropdown4, &ui_gaugeText4 },
+    { &ui_gauge1, &ui_piddropdown1, &ui_unitdropdown1, &ui_gaugeText1 },
+    { &ui_gauge2, &ui_piddropdown2, &ui_unitdropdown2, &ui_gaugeText2 },
+    { &ui_gauge3, &ui_piddropdown3, &ui_unitdropdown3, &ui_gaugeText3 },
+    { &ui_gauge4, &ui_piddropdown4, &ui_unitdropdown4, &ui_gaugeText4 },
 };
 
 #define NUM_GAUGE_WIDGETS (sizeof(s_gauge_widgets) / sizeof(s_gauge_widgets[0]))
@@ -155,6 +163,9 @@ static void gauge_update_cb(lv_timer_t *timer)
         const gauge_slot_t *g = gauge_engine_get_slot(i);
         if (!g || g->pid_id == 0xFFFF) continue;
 
+        // Virtual IMU — imu_display has its own timer, skip label update
+        if (GAUGE_IS_VIRTUAL(g->pid_id)) continue;
+
         lv_obj_t *label = *(s_gauge_widgets[i].value_label);
         if (label) {
             lv_label_set_text(label, g->value_str);
@@ -181,7 +192,50 @@ static void on_pid_changed(lv_event_t *e)
         if (*(s_gauge_widgets[i].pid_dropdown) != dropdown) continue;
 
         uint16_t sel = lv_dropdown_get_selected(dropdown);
+
+        // Check what was previously in this slot (for IMU detach)
+        const gauge_slot_t *prev = gauge_engine_get_slot(i);
+        bool was_imu = prev && prev->pid_id == VPID_IMU;
+
         gauge_engine_set_pid(i, sel);
+
+        // Check if the new selection is IMU
+        const gauge_slot_t *g = gauge_engine_get_slot(i);
+        bool is_imu = g && g->pid_id == VPID_IMU;
+
+        // --- IMU attach / detach logic ---
+        if (was_imu && !is_imu) {
+            // Switching away from IMU — detach bubble, show value label
+            imu_display_detach();
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (is_imu && !was_imu) {
+            // Switching to IMU — enforce uniqueness (detach from other slot)
+            for (int j = 0; j < (int)NUM_GAUGE_WIDGETS; j++) {
+                if (j == i) continue;
+                const gauge_slot_t *other = gauge_engine_get_slot(j);
+                if (other && other->pid_id == VPID_IMU) {
+                    gauge_engine_clear_slot(j);
+                    lv_obj_t *other_label = *(s_gauge_widgets[j].value_label);
+                    if (other_label) {
+                        lv_obj_clear_flag(other_label, LV_OBJ_FLAG_HIDDEN);
+                        lv_label_set_text(other_label, "---");
+                    }
+                    // Reset that slot's PID dropdown to "none" (first entry)
+                    lv_obj_t *other_dd = *(s_gauge_widgets[j].pid_dropdown);
+                    if (other_dd) lv_dropdown_set_selected(other_dd, 0);
+                }
+            }
+
+            // Hide value label, attach IMU display to this gauge panel
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+
+            lv_obj_t *panel = *(s_gauge_widgets[i].gauge_panel);
+            imu_display_attach(panel);
+        }
 
         // Refresh unit dropdown for this gauge
         static char unit_opts[GAUGE_UNIT_OPTS_LEN];
@@ -192,12 +246,14 @@ static void on_pid_changed(lv_event_t *e)
             lv_dropdown_set_selected(unit_dd, 0);
         }
 
-        // Reset value display
-        lv_obj_t *label = *(s_gauge_widgets[i].value_label);
-        if (label) lv_label_set_text(label, "---");
+        // Reset value display (for non-IMU slots)
+        if (!is_imu) {
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_label_set_text(label, "---");
+        }
 
-        const gauge_slot_t *g = gauge_engine_get_slot(i);
-        ESP_LOGI(TAG, "Gauge %d -> PID 0x%04X", i, g ? g->pid_id : 0xFFFF);
+        ESP_LOGI(TAG, "Gauge %d -> PID 0x%04X%s", i,
+                 g ? g->pid_id : 0xFFFF, is_imu ? " (IMU)" : "");
         return;
     }
 }
@@ -216,9 +272,12 @@ static void on_unit_changed(lv_event_t *e)
         uint16_t sel = lv_dropdown_get_selected(dropdown);
         gauge_engine_set_unit(i, sel);
 
-        // Immediately update the label if we have a value
+        // For IMU, also notify imu_display of mode change
         const gauge_slot_t *g = gauge_engine_get_slot(i);
-        if (g && g->value_valid) {
+        if (g && g->pid_id == VPID_IMU) {
+            imu_display_set_mode((imu_display_mode_t)sel);
+        } else if (g && g->value_valid) {
+            // Immediately update the label if we have a value
             lv_obj_t *label = *(s_gauge_widgets[i].value_label);
             if (label) lv_label_set_text(label, g->value_str);
         }
@@ -309,6 +368,33 @@ static void on_scan_complete(scan_status_t status, const comm_vehicle_info_t *in
             for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
                 const gauge_slot_t *g = gauge_engine_get_slot(i);
                 if (!g || g->pid_id == 0xFFFF) continue;
+
+                // Handle virtual IMU PID restoration
+                if (g->pid_id == VPID_IMU) {
+                    // Set PID dropdown to IMU entry (index = meta_count)
+                    lv_obj_t *pid_dd = *(s_gauge_widgets[i].pid_dropdown);
+                    if (pid_dd) lv_dropdown_set_selected(pid_dd, meta_count);
+
+                    // Set unit dropdown (G-Load / Tilt)
+                    static char imu_unit_opts[GAUGE_UNIT_OPTS_LEN];
+                    gauge_engine_get_unit_options(i, imu_unit_opts, sizeof(imu_unit_opts));
+                    lv_obj_t *unit_dd = *(s_gauge_widgets[i].unit_dropdown);
+                    if (unit_dd) {
+                        lv_dropdown_set_options(unit_dd, imu_unit_opts);
+                        lv_dropdown_set_selected(unit_dd, (int)g->display_unit);
+                    }
+
+                    // Hide value label and attach IMU display
+                    lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+                    if (label) lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+
+                    lv_obj_t *panel = *(s_gauge_widgets[i].gauge_panel);
+                    imu_display_attach(panel);
+                    imu_display_set_mode((imu_display_mode_t)g->display_unit);
+
+                    ESP_LOGI(TAG, "Restored IMU in gauge slot %d", i);
+                    continue;
+                }
 
                 // Find metadata index for this PID to set dropdown selection
                 for (int m = 0; m < meta_count; m++) {
@@ -456,6 +542,7 @@ void pollCAN(lv_event_t * e)
         for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
             const gauge_slot_t *g = gauge_engine_get_slot(i);
             if (!g || g->pid_id == 0xFFFF) continue;
+            if (GAUGE_IS_VIRTUAL(g->pid_id)) continue;  // Skip virtual PIDs
             // Deduplicate
             bool dup = false;
             for (int j = 0; j < log_count; j++) {
@@ -496,6 +583,9 @@ void ui_events_post_init(void)
     s_last_can_status = 0;
     s_status_timer = lv_timer_create(status_timer_cb, 500, NULL);
 
+    // IMU display initialized when user selects "IMU" in PID dropdown
+    // (no longer tied to a fixed gyroPanel widget)
+
     // Show saved VIN from NVS (if available from previous session)
     comm_vehicle_info_t saved_info;
     if (comm_link_get_vehicle_info(&saved_info)) {
@@ -506,4 +596,113 @@ void ui_events_post_init(void)
     }
 
     ESP_LOGI(TAG, "Status label and timer started");
+}
+
+// ============================================================================
+// Settings Button — navigate to Screen2 (auto-stops polling)
+// ============================================================================
+
+void settingsButton(lv_event_t * e)
+{
+    (void)e;
+
+    // Auto-stop polling when entering settings
+    if (gauge_engine_is_polling()) {
+        ESP_LOGI(TAG, "Stopping polling before entering settings...");
+
+        // Stop logger first
+        if (logger_get_state() == LOGGER_STATE_LOGGING) {
+            logger_stop();
+            ESP_LOGI(TAG, "Data logging stopped for settings");
+        }
+
+        gauge_engine_stop_polling();
+
+        // Clear gauge displays
+        for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
+            lv_obj_t *label = *(s_gauge_widgets[i].value_label);
+            if (label) lv_label_set_text(label, "---");
+        }
+
+        if (s_gauge_timer) {
+            lv_timer_del(s_gauge_timer);
+            s_gauge_timer = NULL;
+        }
+
+        // Update poll button text
+        lv_label_set_text(ui_Label2, "Poll");
+        ESP_LOGI(TAG, "Polling stopped");
+    }
+
+    // NOTE: SquareLine calls _ui_screen_change() AFTER this function returns,
+    // which destroys and recreates Screen2. We must defer widget initialization
+    // until after the screen transition completes.
+    lv_timer_t *t = lv_timer_create(settings_screen_deferred_init, 200, NULL);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+// ============================================================================
+// Settings Screen — deferred init (runs after screen transition completes)
+// ============================================================================
+
+static void settings_screen_deferred_init(lv_timer_t *timer)
+{
+    (void)timer;
+    settings_screen_init_values();
+}
+
+static void settings_screen_init_values(void)
+{
+    // Set brightness slider to current value
+    if (ui_brightnessSlider) {
+        uint8_t bl = display_get_brightness();
+        lv_slider_set_value(ui_brightnessSlider, bl, LV_ANIM_OFF);
+
+        // Update label to match
+        if (ui_brightnessLabel) {
+            static char bl_text[8];
+            snprintf(bl_text, sizeof(bl_text), "%d", bl);
+            lv_label_set_text(ui_brightnessLabel, bl_text);
+        }
+
+        // Register brightness callback on the newly-created slider
+        // (must re-register every time — Screen2 is destroyed/recreated on each visit)
+        lv_obj_add_event_cb(ui_brightnessSlider, on_brightness_changed,
+                            LV_EVENT_VALUE_CHANGED, NULL);
+    }
+
+    ESP_LOGI(TAG, "Settings screen values initialized (brightness: %d%%)",
+             display_get_brightness());
+}
+
+// ============================================================================
+// Brightness Slider — apply brightness on value change
+// ============================================================================
+
+static void on_brightness_changed(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    int32_t val = lv_slider_get_value(slider);
+    if (val < 0) val = 0;
+    if (val > 100) val = 100;
+
+    display_set_brightness((uint8_t)val);
+
+    // Update label
+    if (ui_brightnessLabel) {
+        static char bl_text[8];
+        snprintf(bl_text, sizeof(bl_text), "%d", (int)val);
+        lv_label_set_text(ui_brightnessLabel, bl_text);
+    }
+}
+
+// ============================================================================
+// WiFi AP Start Button — start WiFi AP and show QR code
+// ============================================================================
+
+void wifiAPstart(lv_event_t * e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "WiFi AP start requested (not yet implemented)");
+    // TODO: wifi_manager_start() + QR code in ui_systemPanel
 }

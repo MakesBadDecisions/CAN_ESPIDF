@@ -28,6 +28,7 @@
 #include "i2c_bus.h"
 #include "tca9554.h"
 #include "qmi8658.h"
+#include "boot_splash.h"
 
 void app_main(void)
 {
@@ -58,6 +59,12 @@ void app_main(void)
     if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
         SYS_LOGW("QMI8658 IMU init failed: %s", esp_err_to_name(ret));
     }
+    if (ret == ESP_OK) {
+        ret = qmi8658_start_task();
+        if (ret != ESP_OK) {
+            SYS_LOGW("QMI8658 task start failed: %s", esp_err_to_name(ret));
+        }
+    }
 
     // Phase 1: Initialize display and LVGL
     ret = display_init();
@@ -65,33 +72,47 @@ void app_main(void)
         SYS_LOGE("Display init failed: %s", esp_err_to_name(ret));
         return;
     }
+
+    // Clear to black immediately — avoids white flash from uninitialized framebuffers
+    if (display_lock(500)) {
+        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
+        display_unlock();
+    }
     
-    // Give LVGL task time to start
+    // Give LVGL task time to start and render black frame
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Phase 2: Initialize touch input (device-specific: SPI or I2C + task on Core 0)
     ret = touch_init();
-    if (ret != ESP_OK) {
+    bool touch_ok = (ret == ESP_OK);
+    if (!touch_ok) {
         SYS_LOGE("Touch init failed: %s", esp_err_to_name(ret));
         // Continue without touch — display still works
     }
 
-    // Phase 3: Touch calibration check
-    if (ret == ESP_OK && !touch_has_calibration()) {
+    // Phase 3: Initialize data logger (SD card mount — needs SPI bus from touch on CrowPanel)
+    ret = logger_init();
+    if (ret != ESP_OK) {
+        SYS_LOGW("SD card init failed - logging disabled: %s", esp_err_to_name(ret));
+        // Non-fatal: continue without logging
+    }
+
+    // Phase 3.5: Boot splash from SD card (visible during remaining init)
+    ret = boot_splash_show();
+    if (ret == ESP_OK) {
+        SYS_LOGI("Boot splash loaded from SD card");
+    } else if (ret != ESP_ERR_NOT_FOUND) {
+        SYS_LOGW("Boot splash failed: %s", esp_err_to_name(ret));
+    }
+
+    // Phase 4: Touch calibration check (first boot only — appears over splash)
+    if (touch_ok && !touch_has_calibration()) {
         SYS_LOGI("No touch calibration found, starting calibration...");
         if (display_lock(5000)) {
             touch_start_calibration();
             display_unlock();
         }
-    }
-
-    // Phase 4: Initialize SquareLine Studio UI
-    if (display_lock(1000)) {
-        ui_init();
-        SYS_LOGI("UI initialized");
-        display_unlock();
-    } else {
-        SYS_LOGE("Failed to acquire display lock for UI init");
     }
 
     // Phase 5: Initialize comm_link (UART RX from CAN Interface node)
@@ -113,17 +134,24 @@ void app_main(void)
         SYS_LOGE("Gauge engine init failed: %s", esp_err_to_name(ret));
     }
 
-    // Phase 7: Create status label and start status polling timer
+    // Phase 7: Wait for minimum splash display time, THEN load UI
+    boot_splash_wait();
+
+    if (display_lock(1000)) {
+        ui_init();
+        SYS_LOGI("UI initialized");
+        display_unlock();
+    } else {
+        SYS_LOGE("Failed to acquire display lock for UI init");
+    }
+
+    // Phase 7.5: Free splash screen memory (UI has taken over display)
+    boot_splash_hide();
+
+    // Phase 8: Create status label and start status polling timer
     if (display_lock(1000)) {
         ui_events_post_init();
         display_unlock();
-    }
-
-    // Phase 8: Initialize data logger (SD card — SPI or SDMMC depending on device)
-    ret = logger_init();
-    if (ret != ESP_OK) {
-        SYS_LOGW("SD card init failed - logging disabled: %s", esp_err_to_name(ret));
-        // Non-fatal: continue without logging
     }
 
     SYS_LOGI("=== Display Node Ready ===");

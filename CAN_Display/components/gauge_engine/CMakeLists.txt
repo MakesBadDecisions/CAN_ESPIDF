@@ -5,5 +5,5 @@
 idf_component_register(
     SRCS "gauge_engine.c"
     INCLUDE_DIRS "."
-    REQUIRES comm_link pid_types nvs_flash
+    REQUIRES comm_link pid_types nvs_flash devices qmi8658
 )

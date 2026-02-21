@@ -168,6 +168,73 @@ esp_err_t qmi8658_power_down(void);
  */
 esp_err_t qmi8658_wake(void);
 
+// ============================================================================
+// Background Task + Orientation Fusion
+// ============================================================================
+
+/** Fused orientation and acceleration data (updated by background task) */
+typedef struct {
+    float pitch;            /**< Pitch angle in degrees (-90 to +90) */
+    float roll;             /**< Roll angle in degrees (-180 to +180) */
+    float yaw_rate;         /**< Yaw rotation rate in °/s (from gyro Z) */
+    float accel_lat;        /**< Lateral acceleration in G (accel X) */
+    float accel_lon;        /**< Longitudinal acceleration in G (accel Y) */
+    float accel_vert;       /**< Vertical acceleration in G (accel Z) */
+    float g_total;          /**< Total G-force magnitude */
+    float temperature;      /**< Die temperature in °C */
+    uint32_t timestamp;     /**< Last update timestamp (ms since boot) */
+    bool   valid;           /**< True after first successful read */
+} qmi8658_orientation_t;
+
+/**
+ * @brief Start the IMU background polling task
+ *
+ * Spawns a Core 0 FreeRTOS task that reads the QMI8658 at ~50 Hz,
+ * runs a complementary filter for pitch/roll, and caches the result.
+ * Requires qmi8658_init() to succeed first.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if not initialized
+ */
+esp_err_t qmi8658_start_task(void);
+
+/**
+ * @brief Stop the IMU background task
+ */
+void qmi8658_stop_task(void);
+
+/**
+ * @brief Get the latest fused orientation data (lock-free read)
+ *
+ * Safe to call from any core/context. Reads a volatile cache
+ * updated by the background task.
+ *
+ * @param[out] orient  Pointer to orientation struct to fill
+ * @return ESP_OK if valid data available, ESP_ERR_NOT_FOUND if no data yet
+ */
+esp_err_t qmi8658_get_orientation(qmi8658_orientation_t *orient);
+
+/**
+ * @brief Trigger a live recalibration
+ *
+ * Stops the current IMU task, invalidates saved calibration, and restarts
+ * the task which will perform a fresh 2-second calibration phase.
+ * The device must be held still during calibration. New calibration is
+ * automatically saved to NVS on completion.
+ *
+ * @return ESP_OK on success (task restarted), ESP_ERR_INVALID_STATE if not initialized
+ */
+esp_err_t qmi8658_calibrate(void);
+
+/**
+ * @brief Clear saved calibration from NVS
+ *
+ * Erases the stored calibration blob. On next boot, a fresh live calibration
+ * will be performed automatically.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t qmi8658_clear_calibration(void);
+
 #ifdef __cplusplus
 }
 #endif

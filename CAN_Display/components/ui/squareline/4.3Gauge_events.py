@@ -10,3 +10,11 @@ def scanCAN(event_struct):
 def pollCAN(event_struct):
     return
 
+
+def settingsButton(event_struct):
+    return
+
+
+def wifiAPstart(event_struct):
+    return
+

@@ -40,3 +40,21 @@ bool display_lock(uint32_t timeout_ms);
  */
 void display_unlock(void);
 
+/**
+ * @brief Set backlight brightness (0-100%)
+ *
+ * On PWM-capable boards (Waveshare): smooth LEDC duty control.
+ * On GPIO-only boards (CrowPanel): 0 = off, 1-100 = on.
+ * Value is persisted to NVS (namespace "display", key "bl_pct").
+ *
+ * @param percent Brightness percentage (0 = off, 100 = full)
+ * @return ESP_OK on success
+ */
+esp_err_t display_set_brightness(uint8_t percent);
+
+/**
+ * @brief Get current backlight brightness percentage
+ * @return Brightness 0-100
+ */
+uint8_t display_get_brightness(void);
+

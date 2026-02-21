@@ -30,6 +30,25 @@
 #define GAUGE_UNIT_OPTS_LEN 128
 
 // ============================================================================
+// Virtual PIDs (local sensors, not from CAN bus)
+// ============================================================================
+
+/** Virtual PID base — IDs 0xFF00+ are local sensor channels, not CAN PIDs */
+#define VPID_BASE           0xFF00
+
+/** IMU virtual PID — 6-axis accelerometer + gyroscope */
+#define VPID_IMU            0xFF00
+
+/** Check if a PID ID is a virtual (non-CAN) channel */
+#define GAUGE_IS_VIRTUAL(pid_id) ((pid_id) >= VPID_BASE && (pid_id) != 0xFFFF)
+
+/** IMU display mode — selected via unit dropdown */
+typedef enum {
+    IMU_MODE_G_LOAD = 0,    /**< G-force bubble (lateral/longitudinal accel) */
+    IMU_MODE_TILT   = 1,    /**< Tilt inclinometer (pitch/roll angles) */
+} imu_display_mode_t;
+
+// ============================================================================
 // Gauge Slot State
 // ============================================================================
 

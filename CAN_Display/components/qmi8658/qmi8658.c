@@ -433,6 +433,391 @@ esp_err_t qmi8658_wake(void)
     return ret;
 }
 
+// ============================================================================
+// Background Task — Core 0, 50 Hz, Boot Calibration + Complementary Filter
+// ============================================================================
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include <math.h>
+
+// Complementary filter coefficient (0.98 = 98% gyro, 2% accel)
+#define COMP_FILTER_ALPHA   0.98f
+
+// Task config
+#define IMU_TASK_STACK      4096
+#define IMU_TASK_PRIO       3
+#define IMU_TASK_CORE       0       // Core 0 — same as touch, away from LVGL DMA
+#define IMU_POLL_MS         20      // 50 Hz
+
+// Calibration: 100 samples = 2 seconds at 50 Hz
+#define CAL_SAMPLES         100
+
+// Debug: log every N iterations (~1s at 50Hz)
+#define IMU_DEBUG_INTERVAL  50
+
+// NVS persistence
+#define NVS_NAMESPACE       "imu_cal"
+#define NVS_KEY_CAL         "cal"
+
+/** NVS-storable calibration blob (version-tagged for future changes) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;        // Blob format version (currently 1)
+    float   gyro_bias[3];   // Gyro bias in DPS
+    float   rot[3][3];      // Rotation matrix (sensor → reference)
+} imu_cal_blob_t;
+
+#define IMU_CAL_BLOB_VER    1
+
+// Cached orientation — written by task, read by UI (volatile for cross-core)
+static volatile qmi8658_orientation_t s_orient = { 0 };
+static TaskHandle_t s_imu_task_handle = NULL;
+
+// ---- Boot calibration data ----
+static struct {
+    float gyro_bias[3];     // Subtracted from raw gyro before rotation
+    float rot[3][3];        // Rotation matrix: sensor frame → reference frame
+    bool  valid;
+} s_cal = { .valid = false };
+
+// Flag: when true, force live calibration even if NVS has saved data
+static bool s_force_recal = false;
+
+// ============================================================================
+// NVS Calibration Persistence
+// ============================================================================
+
+/** Save current calibration to NVS */
+static esp_err_t cal_save_nvs(void)
+{
+    imu_cal_blob_t blob;
+    blob.version = IMU_CAL_BLOB_VER;
+    memcpy(blob.gyro_bias, s_cal.gyro_bias, sizeof(blob.gyro_bias));
+    memcpy(blob.rot, s_cal.rot, sizeof(blob.rot));
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_blob(handle, NVS_KEY_CAL, &blob, sizeof(blob));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Calibration saved to NVS");
+    } else {
+        ESP_LOGE(TAG, "NVS write failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+/** Load calibration from NVS. Returns ESP_OK if valid data found. */
+static esp_err_t cal_load_nvs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;  // No namespace yet — first boot
+    }
+
+    imu_cal_blob_t blob;
+    size_t len = sizeof(blob);
+    err = nvs_get_blob(handle, NVS_KEY_CAL, &blob, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || len != sizeof(blob)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (blob.version != IMU_CAL_BLOB_VER) {
+        ESP_LOGW(TAG, "NVS cal version mismatch (%d vs %d), recalibrating",
+                 blob.version, IMU_CAL_BLOB_VER);
+        return ESP_ERR_INVALID_VERSION;
+    }
+
+    memcpy(s_cal.gyro_bias, blob.gyro_bias, sizeof(s_cal.gyro_bias));
+    memcpy(s_cal.rot, blob.rot, sizeof(s_cal.rot));
+    s_cal.valid = true;
+
+    ESP_LOGI(TAG, "Calibration loaded from NVS: gyro_bias=[%.3f, %.3f, %.3f]",
+             s_cal.gyro_bias[0], s_cal.gyro_bias[1], s_cal.gyro_bias[2]);
+    ESP_LOGI(TAG, "NVS rot: [%.3f %.3f %.3f] [%.3f %.3f %.3f] [%.3f %.3f %.3f]",
+             s_cal.rot[0][0], s_cal.rot[0][1], s_cal.rot[0][2],
+             s_cal.rot[1][0], s_cal.rot[1][1], s_cal.rot[1][2],
+             s_cal.rot[2][0], s_cal.rot[2][1], s_cal.rot[2][2]);
+    return ESP_OK;
+}
+
+/**
+ * @brief Build rotation matrix from measured gravity to Z-up
+ *
+ * Uses Rodrigues' formula to find R such that R * g_norm = [0, 0, 1].
+ * After applying R, the boot orientation becomes pitch=0, roll=0.
+ */
+static void build_rotation_matrix(float gx, float gy, float gz)
+{
+    // Normalize gravity vector
+    float mag = sqrtf(gx * gx + gy * gy + gz * gz);
+    if (mag < 0.1f) {
+        ESP_LOGW(TAG, "Cal: accel magnitude too low (%.3f), using identity", mag);
+        // Identity matrix — no rotation
+        s_cal.rot[0][0] = 1; s_cal.rot[0][1] = 0; s_cal.rot[0][2] = 0;
+        s_cal.rot[1][0] = 0; s_cal.rot[1][1] = 1; s_cal.rot[1][2] = 0;
+        s_cal.rot[2][0] = 0; s_cal.rot[2][1] = 0; s_cal.rot[2][2] = 1;
+        return;
+    }
+    float ax = gx / mag;
+    float ay = gy / mag;
+    float az = gz / mag;
+
+    // Rodrigues' formula: rotate vector [ax,ay,az] to [0,0,1]
+    // d = 1 + az (denominator for 1/(1+cos(theta)))
+    float d = 1.0f + az;
+
+    if (fabsf(d) < 0.001f) {
+        // Device nearly upside down (az ≈ -1): 180° rotation about X axis
+        ESP_LOGW(TAG, "Cal: device nearly inverted, using 180° X rotation");
+        s_cal.rot[0][0] =  1; s_cal.rot[0][1] =  0; s_cal.rot[0][2] =  0;
+        s_cal.rot[1][0] =  0; s_cal.rot[1][1] = -1; s_cal.rot[1][2] =  0;
+        s_cal.rot[2][0] =  0; s_cal.rot[2][1] =  0; s_cal.rot[2][2] = -1;
+    } else {
+        // General case
+        s_cal.rot[0][0] = 1.0f - ax * ax / d;
+        s_cal.rot[0][1] = -ax * ay / d;
+        s_cal.rot[0][2] = -ax;
+        s_cal.rot[1][0] = -ax * ay / d;
+        s_cal.rot[1][1] = 1.0f - ay * ay / d;
+        s_cal.rot[1][2] = -ay;
+        s_cal.rot[2][0] = ax;
+        s_cal.rot[2][1] = ay;
+        s_cal.rot[2][2] = az;
+    }
+}
+
+/** Apply 3x3 rotation matrix to a vector [x,y,z] */
+static inline void rotate_vec(const float rot[3][3],
+                              float x, float y, float z,
+                              float *ox, float *oy, float *oz)
+{
+    *ox = rot[0][0] * x + rot[0][1] * y + rot[0][2] * z;
+    *oy = rot[1][0] * x + rot[1][1] * y + rot[1][2] * z;
+    *oz = rot[2][0] * x + rot[2][1] * y + rot[2][2] * z;
+}
+
+static void imu_task(void *arg)
+{
+    (void)arg;
+
+    qmi8658_reading_t reading;
+    float pitch = 0.0f, roll = 0.0f;
+    bool filter_seeded = false;
+    TickType_t last_wake = xTaskGetTickCount();
+    const float dt = IMU_POLL_MS / 1000.0f;     // 0.02s
+    uint32_t loop_count = 0;
+
+    // Calibration accumulators (running sum over CAL_SAMPLES)
+    float cal_ax = 0, cal_ay = 0, cal_az = 0;
+    float cal_gx = 0, cal_gy = 0, cal_gz = 0;
+    int   cal_count = 0;
+
+    // Try loading calibration from NVS (skip live cal if valid + not forced)
+    if (!s_force_recal && cal_load_nvs() == ESP_OK) {
+        ESP_LOGI(TAG, "IMU task started on core %d @ %d Hz — using saved calibration",
+                 xPortGetCoreID(), 1000 / IMU_POLL_MS);
+    } else {
+        s_cal.valid = false;
+        ESP_LOGI(TAG, "IMU task started on core %d @ %d Hz — calibrating (%d samples)...",
+                 xPortGetCoreID(), 1000 / IMU_POLL_MS, CAL_SAMPLES);
+    }
+    s_force_recal = false;   // Reset flag after use
+
+    while (true) {
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_POLL_MS));
+
+        if (qmi8658_read(&reading) != ESP_OK) {
+            continue;
+        }
+
+        // ================================================================
+        // Phase 1: Boot calibration (first 2 seconds — device must be still)
+        // ================================================================
+        if (!s_cal.valid) {
+            cal_ax += reading.accel.x;
+            cal_ay += reading.accel.y;
+            cal_az += reading.accel.z;
+            cal_gx += reading.gyro.x;
+            cal_gy += reading.gyro.y;
+            cal_gz += reading.gyro.z;
+            cal_count++;
+
+            if (cal_count >= CAL_SAMPLES) {
+                float n = (float)cal_count;
+
+                // Gyro bias (average at rest — subtract from all future readings)
+                s_cal.gyro_bias[0] = cal_gx / n;
+                s_cal.gyro_bias[1] = cal_gy / n;
+                s_cal.gyro_bias[2] = cal_gz / n;
+
+                // Build rotation matrix from average gravity → Z-up
+                build_rotation_matrix(cal_ax / n, cal_ay / n, cal_az / n);
+                s_cal.valid = true;
+
+                ESP_LOGI(TAG, "Cal done: gravity=[%.3f, %.3f, %.3f] "
+                              "gyro_bias=[%.3f, %.3f, %.3f]",
+                         cal_ax / n, cal_ay / n, cal_az / n,
+                         s_cal.gyro_bias[0], s_cal.gyro_bias[1], s_cal.gyro_bias[2]);
+                ESP_LOGI(TAG, "Cal rot: [%.3f %.3f %.3f] [%.3f %.3f %.3f] [%.3f %.3f %.3f]",
+                         s_cal.rot[0][0], s_cal.rot[0][1], s_cal.rot[0][2],
+                         s_cal.rot[1][0], s_cal.rot[1][1], s_cal.rot[1][2],
+                         s_cal.rot[2][0], s_cal.rot[2][1], s_cal.rot[2][2]);
+
+                // Persist to NVS
+                cal_save_nvs();
+            }
+            continue;   // Skip orientation output during calibration
+        }
+
+        // ================================================================
+        // Phase 2: Apply calibration and compute orientation
+        // ================================================================
+
+        // Subtract gyro bias
+        float gx_raw = reading.gyro.x - s_cal.gyro_bias[0];
+        float gy_raw = reading.gyro.y - s_cal.gyro_bias[1];
+        float gz_raw = reading.gyro.z - s_cal.gyro_bias[2];
+
+        // Rotate accel + gyro into reference frame (boot orientation = level)
+        float ax, ay, az;
+        rotate_vec(s_cal.rot,
+                   reading.accel.x, reading.accel.y, reading.accel.z,
+                   &ax, &ay, &az);
+        float gx, gy, gz;
+        rotate_vec(s_cal.rot, gx_raw, gy_raw, gz_raw, &gx, &gy, &gz);
+
+        // Accelerometer-based tilt (now in reference frame: Z=up, X=forward, Y=right)
+        float acc_pitch = atan2f(ax, sqrtf(ay * ay + az * az)) * (180.0f / M_PI);
+        float acc_roll  = atan2f(-ay, az) * (180.0f / M_PI);
+
+        if (!filter_seeded) {
+            pitch = acc_pitch;
+            roll  = acc_roll;
+            filter_seeded = true;
+        } else {
+            // Complementary filter: gyro short-term + accel long-term
+            pitch = COMP_FILTER_ALPHA * (pitch + gy * dt) + (1.0f - COMP_FILTER_ALPHA) * acc_pitch;
+            roll  = COMP_FILTER_ALPHA * (roll  + gx * dt) + (1.0f - COMP_FILTER_ALPHA) * acc_roll;
+        }
+
+        // Clamp angles
+        if (pitch >  90.0f) pitch =  90.0f;
+        if (pitch < -90.0f) pitch = -90.0f;
+        if (roll  >  180.0f) roll =  180.0f;
+        if (roll  < -180.0f) roll = -180.0f;
+
+        // Total G magnitude (from raw — rotation doesn't change magnitude)
+        float g_total = sqrtf(ax * ax + ay * ay + az * az);
+
+        // Write to volatile cache
+        qmi8658_orientation_t o;
+        o.pitch       = pitch;
+        o.roll        = roll;
+        o.yaw_rate    = gz;             // Yaw = rotation about calibrated vertical
+        o.accel_lat   = ay;             // Calibrated lateral G (right = +)
+        o.accel_lon   = ax;             // Calibrated longitudinal G (forward = +)
+        o.accel_vert  = az;             // Calibrated vertical G (up = +, ~1.0 at rest)
+        o.g_total     = g_total;
+        o.temperature = reading.temperature;
+        o.timestamp   = reading.timestamp;
+        o.valid       = true;
+
+        *((qmi8658_orientation_t *)&s_orient) = o;
+
+        // Periodic debug output (ESP_LOG_DEBUG — enable with esp_log_level_set("qmi8658", ESP_LOG_DEBUG))
+        loop_count++;
+        if ((loop_count % IMU_DEBUG_INTERVAL) == 0) {
+            ESP_LOGD(TAG, "CAL ACC: X=%.3f Y=%.3f Z=%.3f | GYRO: X=%.2f Y=%.2f Z=%.2f | "
+                          "P=%.1f R=%.1f Yaw=%.1f | Gtot=%.2f T=%.1fC",
+                     ax, ay, az, gx, gy, gz,
+                     pitch, roll, gz, g_total, reading.temperature);
+        }
+    }
+}
+
+esp_err_t qmi8658_start_task(void)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Cannot start task — QMI8658 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_imu_task_handle) {
+        ESP_LOGW(TAG, "IMU task already running");
+        return ESP_OK;
+    }
+
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        imu_task, "imu_task", IMU_TASK_STACK, NULL,
+        IMU_TASK_PRIO, &s_imu_task_handle, IMU_TASK_CORE);
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create IMU task");
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+void qmi8658_stop_task(void)
+{
+    if (s_imu_task_handle) {
+        vTaskDelete(s_imu_task_handle);
+        s_imu_task_handle = NULL;
+        ESP_LOGI(TAG, "IMU task stopped");
+    }
+}
+
+esp_err_t qmi8658_get_orientation(qmi8658_orientation_t *orient)
+{
+    if (!orient) return ESP_ERR_INVALID_ARG;
+    *orient = *((qmi8658_orientation_t *)&s_orient);
+    return orient->valid ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t qmi8658_calibrate(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Stop existing task, force recal, restart
+    qmi8658_stop_task();
+    s_cal.valid = false;
+    s_force_recal = true;
+    // Clear orientation cache so UI shows no data during cal
+    memset((void *)&s_orient, 0, sizeof(s_orient));
+    ESP_LOGI(TAG, "Recalibration requested — hold device still for 2 seconds");
+    return qmi8658_start_task();
+}
+
+esp_err_t qmi8658_clear_calibration(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_erase_key(handle, NVS_KEY_CAL);
+    if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_commit(handle);
+        err = ESP_OK;
+    }
+    nvs_close(handle);
+    s_cal.valid = false;
+    ESP_LOGI(TAG, "Calibration cleared from NVS");
+    return err;
+}
+
 #else
 // ============================================================================
 // Stub implementations for devices without IMU
@@ -453,5 +838,10 @@ esp_err_t qmi8658_set_acc_range(qmi8658_acc_range_t r) { (void)r; return ESP_ERR
 esp_err_t qmi8658_set_gyro_range(qmi8658_gyro_range_t r) { (void)r; return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t qmi8658_power_down(void) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t qmi8658_wake(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t qmi8658_start_task(void) { return ESP_ERR_NOT_SUPPORTED; }
+void qmi8658_stop_task(void) { }
+esp_err_t qmi8658_get_orientation(qmi8658_orientation_t *o) { (void)o; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t qmi8658_calibrate(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t qmi8658_clear_calibration(void) { return ESP_ERR_NOT_SUPPORTED; }
 
 #endif // HAS_IMU

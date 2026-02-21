@@ -16,6 +16,7 @@
 #include "gauge_engine.h"
 #include "comm_link.h"
 #include "pid_types.h"
+#include "device.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -23,6 +24,10 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdio.h>
+
+#if defined(HAS_IMU) && HAS_IMU
+#include "qmi8658.h"
+#endif
 
 #define NVS_NAMESPACE   "gauge_cfg"
 #define NVS_KEY_SLOTS   "slots"
@@ -102,6 +107,30 @@ esp_err_t gauge_engine_set_pid(int slot, int pid_index)
 {
     if (slot < 0 || slot >= GAUGE_MAX_SLOTS) return ESP_ERR_INVALID_ARG;
 
+#if defined(HAS_IMU) && HAS_IMU
+    // Virtual IMU entry is appended after all CAN PIDs in dropdown
+    int meta_count = comm_link_get_pid_meta_count();
+    if (pid_index == meta_count) {
+        LOCK();
+        gauge_slot_t *g = &s_slots[slot];
+        g->pid_id       = VPID_IMU;
+        g->base_unit    = PID_UNIT_NONE;   // Mode stored in display_unit
+        g->display_unit = PID_UNIT_NONE;   // 0 = G-Load mode
+        g->value_valid  = false;
+        strcpy(g->value_str, "---");
+        UNLOCK();
+
+        ESP_LOGI(TAG, "Slot %d -> IMU (virtual PID 0x%04X)", slot, VPID_IMU);
+
+        if (s_polling) {
+            gauge_engine_rebuild_poll_list();
+        }
+
+        gauge_engine_save_config();
+        return ESP_OK;
+    }
+#endif
+
     uint16_t pid_id = comm_link_get_meta_pid_id(pid_index);
     if (pid_id == 0xFFFF) return ESP_ERR_INVALID_ARG;
 
@@ -139,6 +168,19 @@ esp_err_t gauge_engine_set_unit(int slot, int unit_index)
         UNLOCK();
         return ESP_ERR_INVALID_STATE;
     }
+
+#if defined(HAS_IMU) && HAS_IMU
+    // For virtual IMU, display_unit stores the mode index (0=G-Load, 1=Tilt)
+    if (g->pid_id == VPID_IMU) {
+        g->display_unit = (pid_unit_t)unit_index;
+        UNLOCK();
+        ESP_LOGI(TAG, "Slot %d IMU mode -> %s", slot,
+                 unit_index == IMU_MODE_TILT ? "Tilt" : "G-Load");
+        gauge_engine_save_config();
+        return ESP_OK;
+    }
+#endif
+
     g->display_unit = resolve_unit(g->base_unit, unit_index);
     // Re-convert existing value immediately
     if (g->value_valid) {
@@ -251,6 +293,24 @@ int gauge_engine_load_config(void)
     for (int slot = 0; slot < GAUGE_MAX_SLOTS; slot++) {
         if (records[slot].pid_id == 0xFFFF) continue;
 
+#if defined(HAS_IMU) && HAS_IMU
+        // Restore virtual IMU PID (bypass comm_link metadata lookup)
+        if (records[slot].pid_id == VPID_IMU) {
+            int meta_count_load = comm_link_get_pid_meta_count();
+            gauge_engine_set_pid(slot, meta_count_load);  // IMU index = meta_count
+
+            // Restore display mode (0=G-Load, 1=Tilt)
+            if (records[slot].display_unit > 0) {
+                gauge_engine_set_unit(slot, records[slot].display_unit);
+            }
+
+            restored++;
+            ESP_LOGI(TAG, "Slot %d restored: IMU (virtual), mode %d",
+                     slot, records[slot].display_unit);
+            continue;
+        }
+#endif
+
         // Find metadata index for this PID
         int meta_idx = -1;
         for (int m = 0; m < meta_count; m++) {
@@ -322,6 +382,14 @@ int gauge_engine_get_unit_options(int slot, char *buf, int buf_len)
         return 0;
     }
 
+#if defined(HAS_IMU) && HAS_IMU
+    // Virtual IMU: display mode options instead of unit conversion
+    if (pid_id == VPID_IMU) {
+        snprintf(buf, buf_len, "G-Load\nTilt");
+        return 2;
+    }
+#endif
+
     int pos = 0;
     int count = 0;
 
@@ -370,6 +438,17 @@ int gauge_engine_build_pid_options(char *buf, int buf_len)
         pos += snprintf(buf + pos, buf_len - pos, "0x%02X %s", pid_id, name);
         count++;
     }
+
+#if defined(HAS_IMU) && HAS_IMU
+    // Append virtual IMU entry after all CAN PIDs
+    if (pos < buf_len - 8) {
+        if (count > 0) {
+            pos += snprintf(buf + pos, buf_len - pos, "\n");
+        }
+        pos += snprintf(buf + pos, buf_len - pos, "IMU");
+        count++;
+    }
+#endif
 
     return count;
 }
@@ -435,6 +514,7 @@ esp_err_t gauge_engine_rebuild_poll_list(void)
     LOCK();
     for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
         if (s_slots[i].pid_id == 0xFFFF) continue;
+        if (GAUGE_IS_VIRTUAL(s_slots[i].pid_id)) continue;  // Skip virtual PIDs
 
         // Deduplicate (multiple gauges may watch the same PID)
         bool dup = false;
@@ -448,6 +528,17 @@ esp_err_t gauge_engine_rebuild_poll_list(void)
     UNLOCK();
 
     if (count == 0) {
+        // No CAN PIDs to poll (may have only virtual PIDs which is fine)
+        bool has_any_slot = false;
+        LOCK();
+        for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
+            if (s_slots[i].pid_id != 0xFFFF) { has_any_slot = true; break; }
+        }
+        UNLOCK();
+        if (has_any_slot) {
+            ESP_LOGI(TAG, "Only virtual PIDs assigned — no CAN poll list needed");
+            return ESP_OK;
+        }
         ESP_LOGW(TAG, "No PIDs assigned to any gauge slot");
         return ESP_ERR_INVALID_STATE;
     }
@@ -468,6 +559,7 @@ int gauge_engine_get_active_pid_count(void)
     LOCK();
     for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
         if (s_slots[i].pid_id == 0xFFFF) continue;
+        if (GAUGE_IS_VIRTUAL(s_slots[i].pid_id)) continue;  // Skip virtual PIDs
         bool dup = false;
         for (int j = 0; j < count; j++) {
             if (seen[j] == s_slots[i].pid_id) { dup = true; break; }
@@ -497,6 +589,23 @@ int gauge_engine_update(void)
     for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
         gauge_slot_t *g = &s_slots[i];
         if (g->pid_id == 0xFFFF) continue;
+
+#if defined(HAS_IMU) && HAS_IMU
+        // Virtual IMU — read from IMU driver, not comm_link
+        if (g->pid_id == VPID_IMU) {
+            qmi8658_orientation_t orient;
+            if (qmi8658_get_orientation(&orient) == ESP_OK) {
+                g->raw_value = orient.g_total;
+                g->display_value = orient.g_total;
+                snprintf(g->value_str, GAUGE_VALUE_STR_LEN, "%.2fG", orient.g_total);
+                g->value_valid = true;
+                g->stale = false;
+                g->last_update_tick = xTaskGetTickCount();
+                updated++;
+            }
+            continue;
+        }
+#endif
 
         pid_cache_entry_t val;
         if (!comm_link_get_pid(g->pid_id, &val)) continue;

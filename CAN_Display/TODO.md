@@ -127,7 +127,7 @@ The primary user interaction flow:
 - [x] Backlight PWM control -- LEDC peripheral for brightness adjustment (Waveshare)
 - [ ] CrowPanel 5" (DIS07050) -- 800x480 RGB LCD (untested)
 - [ ] CrowPanel 7" (DIS08070H) -- 800x480 RGB LCD (untested)
-- [ ] Boot splash screen -- render CAN_ESPIDF logo during initialization
+- [x] Boot splash screen -- BMP loader renders SD card image during initialization
 
 ## touch_driver/
 
@@ -164,9 +164,15 @@ The primary user interaction flow:
 - [x] No LVGL dependency -- pure data manager
 - [x] NVS persistence -- save/load per-slot PID and unit assignments (namespace "gauge_cfg")
 - [x] Auto-save on set_pid / set_unit / clear_slot with suppress-save guard during load
-- [ ] Alert thresholds -- warning/critical limits per slot
-- [ ] Value smoothing -- low-pass filter or EMA for jittery readings
-- [ ] Gauge type renderers -- sweep dials, bar graphs (currently numeric-only via LVGL labels)
+- [x] Virtual PID infrastructure -- VPID_BASE (0xFF00+), GAUGE_IS_VIRTUAL() macro, bypass comm_link for virtual channels
+- [x] IMU as virtual PID -- "IMU" appears in PID dropdown (appended after CAN PIDs), VPID_IMU = 0xFF00
+- [x] IMU unit dropdown -- "G-Load" / "Tilt" mode selector (display_unit stores mode index)
+- [x] IMU bubble renders inside gauge slot panel -- replaces dedicated gyroPanel1, inner container avoids dropdowns
+- [x] Virtual PID NVS persistence -- VPID_IMU stored/restored from NVS naturally, display mode preserved
+- [x] Virtual PID poll list -- virtual PIDs excluded from CAN poll list, rebuild_poll_list handles IMU-only case
+- [x] IMU uniqueness enforcement -- only one gauge slot can host IMU at a time (ui_events.c on_pid_changed)
+- [ ] Alert thresholds -- warning/critical limits per slot (WiFi Manager scope)
+- [ ] Gauge type renderers -- sweep dials, bar graphs, symbols, arc gauges (see Project Vision below)
 
 ## data_logger/
 
@@ -188,71 +194,66 @@ The primary user interaction flow:
 
 The WiFi Manager is a full-featured configuration portal served over a WiFi AP.
 It is the primary settings hub for the entire system (both Display and CAN Interface).
+See `components/wifi_manager/README.md` for full architecture, API spec, and QR code design.
 
-### Core Infrastructure
-- [ ] WiFi AP initialization -- configure SSID, password, channel
-- [ ] AP on-demand start -- enable AP via touch button or NVS setting
-- [ ] HTTP server -- ESP-IDF httpd for REST API + static file serving
-- [ ] REST API framework -- JSON request/response, CORS, error handling
-- [ ] Web frontend -- HTML/CSS/JS served from SPIFFS or embedded in firmware
-- [ ] WebSocket support -- real-time live data push to browser (optional)
+### Phase 1: WiFi AP + QR Code + System Status
+- [ ] Enable `LV_USE_QRCODE 1` in `lv_conf.h` (line 660)
+- [ ] WiFi AP init -- APSTA mode, SSID from MAC suffix (CAN_<4hex>), random 8-char password
+- [ ] Random password generator -- `esp_random()`, unambiguous charset (no 0/O/o, 1/l/I)
+- [ ] WiFi event handler -- track client connect/disconnect, update client count
+- [ ] QR screen (LVGL) -- WiFi QR code centered on screen, SSID and password as text below
+- [ ] QR stage 2 -- swap to URL QR (http://192.168.4.1/) when first client connects
+- [ ] QR screen close button -- stop AP, return to gauge UI
+- [ ] HTTP server start -- `httpd_start()`, register URI handlers
+- [ ] `GET /api/status` -- system info JSON (heap, uptime, link_state, sd_mounted)
+- [ ] `GET /` -- minimal embedded HTML dashboard
+- [ ] NVS settings -- load/save ssid, pass, channel, ap_on (namespace "wifi")
+- [ ] NVS password behavior -- empty = random each start, non-empty = persistent
 
-### Data Logging & Files
-- [ ] Log file browser -- HTML page listing CSV files on SD card
-- [ ] Log file download -- serve CSV files for direct download
-- [ ] Log file delete -- remove old logs to free SD space
-- [ ] SD card status -- show used/free space, card info
+### Phase 2: Log File Browser + Download
+- [ ] `GET /api/logs` -- list CSV files on SD card (name, size, date)
+- [ ] `GET /api/logs/:filename` -- chunked file download (4KB chunks via httpd_resp_send_chunk)
+- [ ] `DELETE /api/logs/:filename` -- delete log file
+- [ ] `GET /api/sd` -- SD card status (total_bytes, free_bytes, mounted)
 - [ ] Log session control -- start/stop logging from web UI
 
-### Display Node Configuration
-- [ ] Gauge layout config -- PID assignments, units, slot mapping
+### Phase 3: Display Configuration API
+- [ ] `GET /api/gauges` -- read all 20 gauge slots (pid_id, units, value)
+- [ ] `POST /api/gauges/:slot` -- set PID and unit for a slot
+- [ ] `DELETE /api/gauges/:slot` -- clear a slot
+- [ ] `GET /api/gauges/pids` -- PID dropdown options from gauge_engine
+- [ ] `GET /api/gauges/:slot/units` -- unit dropdown options per slot
+- [ ] `GET/POST /api/config/splash` -- splash duration read/write (boot_splash API)
+- [ ] `GET/POST /api/config/backlight` -- backlight brightness (needs display_driver API)
 - [ ] Alert thresholds -- warning/critical limits per gauge slot
-- [ ] Backlight / brightness control -- PWM level
 - [ ] Touch calibration -- trigger recalibration from web UI
-- [ ] Unit system preference -- default metric/imperial per vehicle profile
-- [ ] Display theme -- color schemes, gauge styles (future)
 
-### CAN Interface Configuration (proxied over UART)
-- [ ] CAN bitrate selection -- 125k/250k/500k/1M
-- [ ] CAN controller selection -- MCP2515/MCP2518FD/TWAI
-- [ ] Hardware filter configuration -- masks and filters
-- [ ] Poll rate / priority per PID -- priority 1-5 mapping
-- [ ] Extended poll list -- poll PIDs beyond what is displayed on gauges
+### Phase 4: HTML Frontend (Embedded)
+- [ ] Dashboard page -- system status, link state, SD usage, uptime
+- [ ] Logs page -- file list table, download/delete buttons
+- [ ] Gauges page -- slot grid, PID dropdown, unit dropdown per slot
+- [ ] Settings page -- splash duration, backlight, WiFi SSID/pass
+- [ ] Embed as C byte arrays -- `target_add_binary_data()` or const char[] in source
+- [ ] Mobile-friendly layout -- responsive design for phone screens
+
+### Phase 5: CAN Interface Proxy (over UART)
+- [ ] `GET /api/can/status` -- CAN bus status from heartbeat data
+- [ ] `POST /api/can/scan` -- trigger vehicle scan via comm_link
+- [ ] `GET /api/can/vehicle` -- VIN, protocol, supported PIDs
+- [ ] `POST /api/can/poll` -- set poll list (PIDs, rate)
+- [ ] `DELETE /api/can/poll` -- clear poll list
 - [ ] Scan control -- trigger vehicle scan from web UI
 
-### Custom PIDs
-- [ ] Custom PID editor -- user-defined address, mode, name, byte count
-- [ ] Custom PID formula -- linear (A*x+B), bitfield, ratio, custom expression
-- [ ] Custom PID units -- user-specified unit string and conversion
-- [ ] Mode 0x22 manufacturer PIDs -- add/edit extended PID definitions
-- [ ] Import/export PID definitions -- JSON or CSV format
-
-### Custom Math Channels
-- [ ] Virtual channel editor -- derived from one or more real PIDs
-- [ ] Predefined templates -- HP from torque+RPM, AFR from lambda, etc.
-- [ ] Formula engine -- basic math operations on PID values
-- [ ] Virtual channels logged alongside real PIDs in CSV
-
-### System Status & Diagnostics
-- [ ] System status page -- connection state, heap, uptime, task info
-- [ ] DTC viewer -- read/display diagnostic trouble codes
-- [ ] DTC clear -- clear codes with confirmation gate
-- [ ] Freeze frame viewer -- show snapshot data for stored DTCs
-- [ ] ECU info display -- VIN, calibration IDs, ECU names
-- [ ] CAN bus statistics -- TX/RX counts, error rates, bus load
-
-### Vehicle Profiles
-- [ ] Save/load vehicle profiles -- per-VIN gauge configs and PID lists
-- [ ] Auto-detect vehicle -- match VIN to saved profile on connect
-- [ ] Profile export/import -- backup/restore via file download/upload
-
-### Hardware Addons
-- [ ] Sensor data integration -- BME/BMP (temp/humidity/pressure), gyro, QST attitude
-- [ ] Sensor channels in logger -- log addon sensor data alongside CAN PIDs
-- [ ] Sensor calibration/config -- offsets, orientation, sample rates
-- [ ] Buzzer control -- alert tones, configurable triggers
-- [ ] RGB LED control -- status indicators, alert colors, patterns
-- [ ] Addon enable/disable -- toggle hardware addons via web UI
+### Phase 6+ (Future / Deferred)
+- [ ] DTC viewer / clear -- CMD_READ_DTCS/CMD_CLEAR_DTCS via comm_protocol
+- [ ] Custom PID editor -- user-defined address, mode, name, formula
+- [ ] Custom math channels -- virtual PIDs derived from real PIDs
+- [ ] Freeze frame viewer -- snapshot data for stored DTCs
+- [ ] CAN bitrate change -- new CONFIG_CMD + CAN Interface handler
+- [ ] Vehicle profiles -- per-VIN gauge configs, auto-detect by VIN
+- [ ] Display themes -- LVGL style system, NVS-persisted
+- [ ] WebSocket live data -- real-time push alternative to polling
+- [ ] Hardware addon config -- IMU cal, sensor offsets, buzzer/LED
 
 ## devices/
 
@@ -287,14 +288,47 @@ It is the primary settings hub for the entire system (both Display and CAN Inter
 - [x] Low-pass filter config -- accel LPF mode 0, gyro LPF mode 3
 - [x] Power management -- power_down / wake API
 - [x] Stub implementation for boards without HAS_IMU
-- [ ] IMU data integration into data logger -- additional CSV columns
-- [ ] IMU data as virtual PID channels in gauge_engine
+- [x] Background task -- 50Hz polling, complementary filter (α=0.98), volatile cache
+- [x] Boot calibration -- 2s gyro bias + Rodrigues' rotation matrix (arbitrary mount)
+- [x] NVS persistence -- save/load calibration to `imu_cal` namespace
+- [x] qmi8658_calibrate() -- force live recalibration (stop/restart task)
+- [x] qmi8658_clear_calibration() -- erase NVS calibration data
+- [x] Gyro range 512 DPS (was 64, caused clipping)
+- [x] Axis mapping -- X=forward, Y=right, Z=up in calibrated reference frame
+- [x] IMU data integration into data logger -- Lateral G + Longitudinal G columns appended to CSV
+- [x] IMU data as virtual PID channels in gauge_engine -- VPID_IMU, gauge_engine_update reads qmi8658
 - [ ] Orientation detection -- portrait/landscape auto-rotate (if useful for round display)
+
+## imu_display/ -- IMU Visualization
+
+- [x] Bubble dot -- maps ±1.5G lateral/longitudinal to panel edges, color-coded by G-force
+- [x] Crosshair lines -- subtle center reference
+- [x] G-force labels -- lateral G, longitudinal G at axis endpoints
+- [x] 10Hz LVGL timer -- reads qmi8658_get_orientation() volatile cache
+- [x] Separate component -- lives outside ui/ directory (SquareLine-safe)
+- [x] HAS_IMU guard -- hides panel on boards without IMU
+- [x] G-load mode -- bubble driven by accel not tilt (correct for on-road use)
+- [x] Refactor to render inside gauge slot -- attach/detach API, inner container for dropdown avoidance
+- [x] Tilt mode option -- unit dropdown toggles G-load vs tilt via imu_display_set_mode()
+- [x] Dual mode rendering -- G-Load (±1.5G accel) and Tilt (±30° pitch/roll) in timer callback
+- [ ] Configurable G range -- adjustable ±1.5G mapping via settings (WiFi Manager scope)
+
+## data_logger/ -- IMU Integration
+
+- [x] Add Lateral G / Longitudinal G columns to CSV output (auto-detected via HAS_IMU)
+- [x] IMU channels in log header (channel info section: PID 65280/65281, names, G units)
+
+## Boot Splash
+
+- [x] Load splash image from SD card /images/splash.bmp
+- [x] Render splash on display during boot sequence (visible during comm_link/gauge init)
+- [x] BMP decoder -- 16/24/32 bpp, bottom-up and top-down, row-by-row to PSRAM RGB565
+- [x] Auto-cleanup -- boot_splash_hide() frees PSRAM after ui_init() takes over
 
 ## main/
 
 - [x] `main.c` -- app_main entry point with boot sequence
-- [x] `main.c` -- system_init -> display_init -> touch_init -> calibration -> ui_init -> comm_link -> gauge_engine_init -> logger_init
+- [x] `main.c` -- system_init -> display_init -> touch_init -> logger_init -> boot_splash -> comm_link -> gauge_engine -> ui_init -> boot_splash_hide -> ui_events_post_init
 - [x] `main.c` -- error handling for init failures (continue with degraded functionality)
 - [x] `main.c` -- gauge_engine_init() wired as Phase 7 after comm_link_start()
 - [x] `CMakeLists.txt` -- register all components
@@ -316,3 +350,48 @@ It is the primary settings hub for the entire system (both Display and CAN Inter
 - [ ] Stress test -- sustained 10Hz PID updates across 30+ PIDs, verify no dropped data
 - [ ] Endurance test -- 1-hour continuous logging, verify no file corruption or heap leak
 - [x] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data
+
+---
+
+## Project Vision
+
+This project will evolve into a **full driver display platform** for:
+- **Retro-mods** -- modern digital gauges in classic cars
+- **Race cars** -- lap data, G-forces, telemetry, alerts
+- **Off-road rigs** -- inclinometer, tilt angles, trail data
+- **Primary gauge sets** -- not just addon gauges, but complete instrument clusters
+
+### Gauge Renderer System (WiFi Manager scope)
+
+The current numeric-only gauge rendering will be replaced by a modular renderer
+system supporting multiple visualization types per gauge slot:
+
+- Sweep dials (analog-style arc gauges)
+- Bar graphs (horizontal/vertical fill)
+- Numeric readouts (current, with formatting options)
+- IMU bubble / inclinometer
+- Symbol indicators (CEL, turn signals, warning lights)
+- True IMU 3D visualization
+- Driver-focused composite displays
+
+Renderers will be selectable per gauge slot and configurable via the web UI.
+This requires the WiFi Manager infrastructure to be in place first.
+
+### Virtual Channels & Hardware Integration
+
+Beyond CAN PIDs, the gauge system will support:
+- IMU data as selectable virtual PIDs (G-load, tilt, yaw)
+- Environmental sensors (BME/BMP temp, humidity, pressure)
+- Custom math channels (HP from torque+RPM, AFR from lambda, etc.)
+- Output controls based on user-defined if/and/else logic
+- External inputs from the CAN Interface Node hardware addons
+
+### Design Principles
+
+> Clean, modular code with an overkill of documentation is absolutely critical.
+
+Every component must be:
+- Self-contained with clear API boundaries
+- Documented with README, inline comments, and type definitions
+- Testable in isolation
+- Prepared for display-agnostic rendering (480x272, 480x480, 800x480+)

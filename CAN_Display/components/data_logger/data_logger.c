@@ -15,6 +15,10 @@
 #include "system.h"
 #include "device.h"
 
+#if defined(HAS_IMU) && HAS_IMU
+#include "qmi8658.h"
+#endif
+
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "esp_log.h"
@@ -62,6 +66,7 @@ typedef struct {
     // Channel config for current session
     uint16_t        pids[LOGGER_MAX_CHANNELS];
     uint8_t         pid_count;
+    bool            log_imu;            // Append IMU G-load columns
 
     // Write buffer
     char            buf[LOGGER_WRITE_BUF_SIZE];
@@ -275,6 +280,9 @@ static void write_header(const char *vin)
         snprintf(line, sizeof(line), ",%u", s_ctx.pids[i]);
         buf_puts(line);
     }
+    if (s_ctx.log_imu) {
+        buf_puts(",65280,65281");  // VPID_IMU range for lat/lon G
+    }
     buf_puts("\r\n");
 
     // Row 2: Channel names, first column is "Offset"
@@ -284,6 +292,9 @@ static void write_header(const char *vin)
         snprintf(line, sizeof(line), ",%s", name ? name : "Unknown");
         buf_puts(line);
     }
+    if (s_ctx.log_imu) {
+        buf_puts(",Lateral G,Longitudinal G");
+    }
     buf_puts("\r\n");
 
     // Row 3: Units, first column is "s"
@@ -292,6 +303,9 @@ static void write_header(const char *vin)
         const char *unit = comm_link_get_pid_unit_str(s_ctx.pids[i]);
         snprintf(line, sizeof(line), ",%s", unit ? unit : "?");
         buf_puts(line);
+    }
+    if (s_ctx.log_imu) {
+        buf_puts(",G,G");
     }
     buf_puts("\r\n");
 
@@ -328,6 +342,13 @@ esp_err_t logger_start(const uint16_t *pids, uint8_t pid_count, const char *vin)
     // Copy channel config
     s_ctx.pid_count = (pid_count > LOGGER_MAX_CHANNELS) ? LOGGER_MAX_CHANNELS : pid_count;
     memcpy(s_ctx.pids, pids, s_ctx.pid_count * sizeof(uint16_t));
+
+    // Auto-detect IMU availability for G-load logging
+#if defined(HAS_IMU) && HAS_IMU
+    s_ctx.log_imu = true;
+#else
+    s_ctx.log_imu = false;
+#endif
 
     // Increment file number and persist
     s_ctx.file_number++;
@@ -421,6 +442,20 @@ void logger_log_row(void)
         }
         buf_puts(line);
     }
+
+    // Append IMU G-load columns if active
+#if defined(HAS_IMU) && HAS_IMU
+    if (s_ctx.log_imu) {
+        qmi8658_orientation_t orient;
+        if (qmi8658_get_orientation(&orient) == ESP_OK) {
+            snprintf(line, sizeof(line), ",%.3f,%.3f",
+                     (double)orient.accel_lat, (double)orient.accel_lon);
+        } else {
+            snprintf(line, sizeof(line), ",,");  // Empty if no data yet
+        }
+        buf_puts(line);
+    }
+#endif
 
     buf_puts("\r\n");
     s_ctx.rows_written++;

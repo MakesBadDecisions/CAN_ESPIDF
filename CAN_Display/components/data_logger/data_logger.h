@@ -67,6 +67,9 @@ esp_err_t logger_init(void);
  * channel info based on currently polled PIDs, then begins capturing
  * data rows via the PID callback.
  *
+ * IMU G-load columns (Lateral G, Longitudinal G) are automatically
+ * appended when IMU hardware is present (HAS_IMU).
+ *
  * @param pids      Array of PID IDs to log (columns)
  * @param pid_count Number of PIDs
  * @param vin       Vehicle VIN string (NULL if unavailable)

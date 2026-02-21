@@ -8,5 +8,6 @@ idf_component_register(
         esp_timer
         devices
         i2c_bus
+        nvs_flash
         log
 )

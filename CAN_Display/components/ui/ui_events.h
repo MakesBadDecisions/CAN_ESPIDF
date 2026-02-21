@@ -6,12 +6,17 @@
 #ifndef _UI_EVENTS_H
 #define _UI_EVENTS_H
 
+#include "lvgl.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void connectCAN(lv_event_t * e);
 void pollCAN(lv_event_t * e);
+void settingsButton(lv_event_t * e);
+void wifiAPstart(lv_event_t * e);
+void ui_events_post_init(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/
