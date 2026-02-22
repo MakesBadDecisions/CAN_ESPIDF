@@ -49,6 +49,42 @@ typedef enum {
 } imu_display_mode_t;
 
 // ============================================================================
+// Alert Thresholds
+// ============================================================================
+
+/** Alert severity level, evaluated per-tick in gauge_engine_update() */
+typedef enum {
+    ALERT_NONE     = 0,   /**< Normal — value within safe range */
+    ALERT_WARN     = 1,   /**< Warning — yellow/amber border (blends toward red) */
+    ALERT_CRITICAL = 2,   /**< Critical — flashing red border + red text */
+    ALERT_MAX      = 3,   /**< MAX exceeded — flashing red + buzzer */
+} alert_level_t;
+
+/** Maximum number of PIDs with alert thresholds */
+#define ALERT_MAX_ENTRIES  32
+
+/**
+ * Per-PID alert threshold config (stored in NVS).
+ *
+ * Three numbers define the alert zones:
+ *   value < warn            → NORMAL
+ *   warn ≤ value < crit     → WARNING  (yellow, blending to red)
+ *   crit ≤ value < max      → CRITICAL (flashing red + red text)
+ *   value ≥ max             → MAX      (flashing red + red text + buzzer)
+ *
+ * Threshold direction is implicit:
+ *   warn < crit  → alert on HIGH values (temp, RPM, boost)
+ *   warn > crit  → alert on LOW values  (oil pressure, voltage)
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t pid_id;        /**< PID ID (0xFFFF = unused entry) */
+    uint16_t _pad;          /**< Alignment padding */
+    float    warn;          /**< Start of warning zone (base unit) */
+    float    crit;          /**< Start of critical zone (base unit) */
+    float    max;           /**< Critical maximum (base unit) */
+} pid_alert_config_t;       /* 16 bytes total */
+
+// ============================================================================
 // Gauge Slot State
 // ============================================================================
 
@@ -65,6 +101,10 @@ typedef struct {
     bool        value_valid;        // Got at least one reading
     bool        stale;              // PID data not updated within timeout
     uint32_t    last_update_tick;   // tick of last update
+
+    // --- Alert state (evaluated by gauge_engine_update) ---
+    alert_level_t alert_level;      // Current alert severity
+    float         alert_progress;   // 0-1 position within warn zone (for color blend)
 } gauge_slot_t;
 
 // ============================================================================
@@ -145,6 +185,23 @@ int gauge_engine_get_unit_options(int slot, char *buf, int buf_len);
  */
 int gauge_engine_build_pid_options(char *buf, int buf_len);
 
+/**
+ * @brief Notify that PID dropdown options have changed (new poll list)
+ *
+ * Sets interior flag so the UI can repopulate dropdowns on next tick.
+ */
+void gauge_engine_notify_pid_options_changed(void);
+
+/**
+ * @brief Check and clear the "PID options dirty" flag
+ *
+ * Called from the gauge timer (LVGL task context) to trigger
+ * dropdown repopulation when the poll list changes.
+ *
+ * @return true if options changed since last check
+ */
+bool gauge_engine_pid_options_dirty(void);
+
 // ============================================================================
 // Polling Control
 // ============================================================================
@@ -222,4 +279,39 @@ esp_err_t gauge_engine_save_config(void);
  * @return Number of slots successfully restored, or -1 on error
  */
 int gauge_engine_load_config(void);
+
+// ============================================================================
+// Alert Threshold API
+// ============================================================================
+
+/**
+ * @brief Set alert thresholds for a PID (in base/native units)
+ *
+ * If warn < crit: alerts trigger when value goes HIGH (temp, RPM, boost).
+ * If warn > crit: alerts trigger when value goes LOW (oil pressure, voltage).
+ * Set all three to 0 to disable alerts for this PID.
+ */
+esp_err_t gauge_engine_set_alert(uint16_t pid_id, float warn, float crit, float max);
+
+/**
+ * @brief Get alert thresholds for a PID
+ * @return true if thresholds are configured for this PID
+ */
+bool gauge_engine_get_alert(uint16_t pid_id, float *warn, float *crit, float *max);
+
+/**
+ * @brief Clear alert thresholds for a PID
+ */
+esp_err_t gauge_engine_clear_alert(uint16_t pid_id);
+
+/**
+ * @brief Save all alert configs to NVS
+ */
+esp_err_t gauge_engine_save_alerts(void);
+
+/**
+ * @brief Load alert configs from NVS (called automatically during init)
+ * @return Number of PIDs with alerts loaded
+ */
+int gauge_engine_load_alerts(void);
 

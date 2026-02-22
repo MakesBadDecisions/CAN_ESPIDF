@@ -7,10 +7,16 @@
 #include "comm_link.h"
 #include "display_driver.h"
 #include "gauge_engine.h"
+#include "pid_store.h"
 #include "data_logger.h"
 #include "pid_types.h"
 #include "imu_display.h"
+#include "wifi_manager.h"
+#include "system.h"
+#include "device.h"
+#include "tca9554.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "ui_Screen1.h"
@@ -25,16 +31,28 @@ static void settings_screen_deferred_init(lv_timer_t *timer);
 static void settings_screen_init_values(void);
 static void on_brightness_changed(lv_event_t *e);
 static void on_colorwheel_changed(lv_event_t *e);
+static void populate_all_pid_dropdowns(void);
+static void sys_info_timer_cb(lv_timer_t *timer);
+static void on_sys_panel_delete(lv_event_t *e);
 
 // Color wheel widget (created dynamically in ui_colorWhellPanel)
 static lv_obj_t *s_colorwheel = NULL;
 static lv_obj_t *s_colorwheel_label = NULL;
+
+// System info panel (created dynamically in ui_systemPanel)
+static lv_obj_t *s_sysinfo_label = NULL;
+static lv_timer_t *s_sysinfo_timer = NULL;
+
+
 
 // Default theme color: blue (RGB565 0x34DB ≈ RGB888 #3498DB)
 // Must be a saturated color — white/gray (S≈0) makes the colorwheel arc invisible
 #define THEME_COLOR_DEFAULT  0x34DB
 #define THEME_NVS_NAMESPACE  "display"
 #define THEME_NVS_KEY        "theme"
+
+// Cached theme color for restoring after alert clears
+static uint16_t s_cached_theme_color = THEME_COLOR_DEFAULT;
 
 // ============================================================================
 // Table-driven gauge widget mapping
@@ -140,7 +158,7 @@ static void scan_timeout_cb(lv_timer_t *timer)
 
     if (comm_link_get_scan_status() != SCAN_STATUS_COMPLETE) {
         ESP_LOGW(TAG, "Scan timed out after %d ms", SCAN_TIMEOUT_MS);
-        lv_label_set_text(ui_Label1, "Connect");
+        lv_label_set_text(ui_Label1, "Scan");
         lv_label_set_text(ui_vehicleInfoLabel1, "Scan timeout");
     }
 }
@@ -154,6 +172,11 @@ static uint32_t s_stale_check_tick = 0;
 static void gauge_update_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    // Check if poll list changed — repopulate PID dropdowns (LVGL-safe context)
+    if (gauge_engine_pid_options_dirty()) {
+        populate_all_pid_dropdowns();
+    }
 
     // Skip update if no new data arrived (check stale every 1s regardless)
     bool new_data = gauge_engine_has_new_data();
@@ -172,6 +195,7 @@ static void gauge_update_cb(lv_timer_t *timer)
     }
 
     // Push formatted strings to LVGL labels
+    bool any_max = false;  // Track if any gauge hits ALERT_MAX for buzzer
     for (int i = 0; i < (int)NUM_GAUGE_WIDGETS; i++) {
         const gauge_slot_t *g = gauge_engine_get_slot(i);
         if (!g || g->pid_id == 0xFFFF) continue;
@@ -189,7 +213,66 @@ static void gauge_update_cb(lv_timer_t *timer)
                 lv_obj_set_style_text_opa(label, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
             }
         }
+
+        // ── Alert visual effects ──
+        lv_obj_t *panel   = *(s_gauge_widgets[i].gauge_panel);
+        lv_obj_t *pid_dd  = *(s_gauge_widgets[i].pid_dropdown);
+        lv_obj_t *unit_dd = *(s_gauge_widgets[i].unit_dropdown);
+
+        if (g->alert_level == ALERT_MAX) {
+            // MAX — flashing red borders + red text + buzzer
+            bool flash_on = ((lv_tick_get() / 300) % 2) == 0;
+            lv_color_t red  = lv_color_hex(0xFF2222);
+            lv_color_t dark = lv_color_hex(0x1a1a2e);
+            lv_color_t bc   = flash_on ? red : dark;
+            if (panel)   lv_obj_set_style_border_color(panel,   bc,  LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (pid_dd)  lv_obj_set_style_border_color(pid_dd,  bc,  LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (unit_dd) lv_obj_set_style_border_color(unit_dd, bc,  LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (label)   lv_obj_set_style_text_color(label, red, LV_PART_MAIN | LV_STATE_DEFAULT);
+            any_max = true;
+
+        } else if (g->alert_level == ALERT_CRITICAL) {
+            // CRITICAL — solid red borders + red text (no flash)
+            lv_color_t red = lv_color_hex(0xFF2222);
+            if (panel)   lv_obj_set_style_border_color(panel,   red, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (pid_dd)  lv_obj_set_style_border_color(pid_dd,  red, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (unit_dd) lv_obj_set_style_border_color(unit_dd, red, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (label)   lv_obj_set_style_text_color(label, red, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        } else if (g->alert_level == ALERT_WARN) {
+            // Yellow→red blended border based on position in warn zone
+            uint8_t gr = 0xAA - (uint8_t)(g->alert_progress * (float)(0xAA - 0x22));
+            lv_color_t wc = lv_color_make(0xFF, gr, 0x00);
+            if (panel)   lv_obj_set_style_border_color(panel,   wc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (pid_dd)  lv_obj_set_style_border_color(pid_dd,  wc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (unit_dd) lv_obj_set_style_border_color(unit_dd, wc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            // Text stays theme color during warning
+            lv_color_t tc; tc.full = s_cached_theme_color;
+            if (label) lv_obj_set_style_text_color(label, tc, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        } else {
+            // Normal — restore theme colors
+            lv_color_t tc; tc.full = s_cached_theme_color;
+            if (panel)   lv_obj_set_style_border_color(panel,   tc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (pid_dd)  lv_obj_set_style_border_color(pid_dd,  tc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (unit_dd) lv_obj_set_style_border_color(unit_dd, tc, LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (label)   lv_obj_set_style_text_color(label, tc, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
     }
+
+    // ── Buzzer control — sound on ALERT_MAX, silence otherwise ──
+#if HAS_BUZZER
+    {
+        static bool s_buzzer_on = false;
+        if (any_max && !s_buzzer_on) {
+            tca9554_set_pin(EXIO_PIN_8, true);
+            s_buzzer_on = true;
+        } else if (!any_max && s_buzzer_on) {
+            tca9554_set_pin(EXIO_PIN_8, false);
+            s_buzzer_on = false;
+        }
+    }
+#endif
 }
 
 // ============================================================================
@@ -456,7 +539,7 @@ static void on_scan_complete(scan_status_t status, const comm_vehicle_info_t *in
 
     } else {
         ESP_LOGW(TAG, "Scan failed with status %d", status);
-        lv_label_set_text(ui_Label1, "Connect");
+        lv_label_set_text(ui_Label1, "Scan");
     }
 
     display_unlock();
@@ -488,7 +571,7 @@ void connectCAN(lv_event_t * e)
     esp_err_t err = comm_link_request_scan(on_scan_complete);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to request scan: %s", esp_err_to_name(err));
-        lv_label_set_text(ui_Label1, "Connect");
+        lv_label_set_text(ui_Label1, "Scan");
     }
 }
 
@@ -530,11 +613,33 @@ void pollCAN(lv_event_t * e)
         return;
     }
 
-    // Start polling all assigned PIDs
-    esp_err_t err = gauge_engine_start_polling(10);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "No PIDs assigned to any gauge");
-        return;
+    // Build poll list from pid_store selection (user's checked PIDs)
+    // Falls back to gauge slot aggregation if no explicit selection exists
+    uint16_t poll_pids[PID_STORE_MAX];
+    int poll_count = pid_store_get_selected(poll_pids, PID_STORE_MAX);
+
+    if (poll_count > 0) {
+        // Send full selected list to CAN Interface
+        uint8_t rate = pid_store_get_rate_hz();
+        esp_err_t err = comm_link_set_poll_list(poll_pids, (uint8_t)poll_count, rate);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set poll list: %s", esp_err_to_name(err));
+            return;
+        }
+
+        // Register PID callback and mark polling active in gauge engine
+        gauge_engine_start_polling(rate);
+
+        ESP_LOGI(TAG, "Polling %d selected PIDs @ %d Hz", poll_count, rate);
+    } else {
+        // No pid_store selection — fall back to gauge-derived poll list
+        esp_err_t err = gauge_engine_start_polling(10);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "No PIDs assigned to any gauge");
+            return;
+        }
+        poll_count = gauge_engine_get_active_pid_count();
+        ESP_LOGI(TAG, "Polling %d gauge PIDs @ 10 Hz (no PID selection)", poll_count);
     }
 
     // Start LVGL update timer (100ms = 10 Hz)
@@ -544,27 +649,26 @@ void pollCAN(lv_event_t * e)
 
     lv_label_set_text(ui_Label2, "Stop");
 
-    int n = gauge_engine_get_active_pid_count();
-    ESP_LOGI(TAG, "Polling %d unique PIDs @ 10 Hz", n);
-
-    // Auto-start data logger if SD card is ready
+    // Auto-start data logger with full selected PID list
     if (logger_is_sd_mounted()) {
-        // Build list of polled PIDs from gauge slots
-        uint16_t log_pids[GAUGE_MAX_SLOTS];
-        int log_count = 0;
-        for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
-            const gauge_slot_t *g = gauge_engine_get_slot(i);
-            if (!g || g->pid_id == 0xFFFF) continue;
-            if (GAUGE_IS_VIRTUAL(g->pid_id)) continue;  // Skip virtual PIDs
-            // Deduplicate
-            bool dup = false;
-            for (int j = 0; j < log_count; j++) {
-                if (log_pids[j] == g->pid_id) { dup = true; break; }
+        uint16_t log_pids[PID_STORE_MAX];
+        int log_count = pid_store_get_selected(log_pids, PID_STORE_MAX);
+
+        // If no pid_store selection, fall back to gauge slots for logger
+        if (log_count == 0) {
+            for (int i = 0; i < GAUGE_MAX_SLOTS; i++) {
+                const gauge_slot_t *g = gauge_engine_get_slot(i);
+                if (!g || g->pid_id == 0xFFFF) continue;
+                if (GAUGE_IS_VIRTUAL(g->pid_id)) continue;
+                bool dup = false;
+                for (int j = 0; j < log_count; j++) {
+                    if (log_pids[j] == g->pid_id) { dup = true; break; }
+                }
+                if (!dup && log_count < PID_STORE_MAX) log_pids[log_count++] = g->pid_id;
             }
-            if (!dup) log_pids[log_count++] = g->pid_id;
         }
+
         if (log_count > 0) {
-            // Get VIN if available
             comm_vehicle_info_t vinfo;
             const char *vin = NULL;
             if (comm_link_get_vehicle_info(&vinfo)) {
@@ -587,6 +691,11 @@ void pollCAN(lv_event_t * e)
 
 void ui_events_post_init(void)
 {
+    // Rename SquareLine-generated "Connect" button to "Scan"
+    if (ui_Label1) {
+        lv_label_set_text(ui_Label1, "Scan");
+    }
+
     // Set initial state on SquareLine-created label
     if (ui_statusLabel1) {
         lv_label_set_text(ui_statusLabel1, "UART: OFF | CAN: OFF");
@@ -758,8 +867,187 @@ static void settings_screen_init_values(void)
     // Apply theme color to Screen2 widgets (just recreated by screen transition)
     ui_apply_theme_color(ui_load_theme_color());
 
+    // ---- System Info Panel ----
+    // Create a multi-line label inside systemPanel, refreshed by timer
+    s_sysinfo_label = NULL;
+    if (s_sysinfo_timer) {
+        lv_timer_del(s_sysinfo_timer);
+        s_sysinfo_timer = NULL;
+    }
+    if (ui_systemPanel) {
+        // Enable padding + flex column layout so the label fills the panel
+        lv_obj_set_flex_flow(ui_systemPanel, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_all(ui_systemPanel, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_gap(ui_systemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        s_sysinfo_label = lv_label_create(ui_systemPanel);
+        lv_obj_set_width(s_sysinfo_label, lv_pct(100));
+        lv_obj_set_height(s_sysinfo_label, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_font(s_sysinfo_label, &lv_font_montserrat_10,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_sysinfo_label,
+                                     lv_color_hex(0xCCCCCC),
+                                     LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_label_set_text(s_sysinfo_label, "Loading...");
+
+        // Refresh every 1 second
+        s_sysinfo_timer = lv_timer_create(sys_info_timer_cb, 1000, NULL);
+
+        // Cleanup timer when systemPanel is destroyed (Screen2 transition)
+        lv_obj_add_event_cb(ui_systemPanel, on_sys_panel_delete,
+                            LV_EVENT_DELETE, NULL);
+
+        // Fire immediately so panel isn't blank for 1 second
+        sys_info_timer_cb(NULL);
+
+        ESP_LOGI(TAG, "System info panel created");
+    }
+
     ESP_LOGI(TAG, "Settings screen values initialized (brightness: %d%%)",
              display_get_brightness());
+}
+
+// ============================================================================
+// System Info Panel — timer callback and cleanup
+// ============================================================================
+
+/**
+ * @brief Format uptime from milliseconds into HH:MM:SS string
+ */
+static void format_uptime(uint32_t ms, char *buf, size_t len)
+{
+    uint32_t total_s = ms / 1000;
+    uint32_t h = total_s / 3600;
+    uint32_t m = (total_s % 3600) / 60;
+    uint32_t s = total_s % 60;
+    snprintf(buf, len, "%02lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)s);
+}
+
+/**
+ * @brief Refresh system info label with current data from both nodes
+ */
+static void sys_info_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_sysinfo_label) return;
+
+    static char info_buf[320];
+    char dsp_up[12], cif_up[12];
+
+    // ---- Display Node data ----
+    uint32_t dsp_heap   = sys_get_free_heap() / 1024;
+    uint32_t dsp_min    = esp_get_minimum_free_heap_size() / 1024;
+    uint32_t dsp_up_ms  = sys_time_ms();
+    format_uptime(dsp_up_ms, dsp_up, sizeof(dsp_up));
+
+    // SD / Logger
+    logger_status_t log_st = logger_get_status();
+    bool sd_ok = logger_is_sd_mounted();
+
+    // ---- CAN Interface data (from heartbeat) ----
+    comm_link_state_t link  = comm_link_get_state();
+    uint8_t can_st          = comm_link_get_can_status();
+    uint16_t cif_heap       = comm_link_get_remote_heap_kb();
+    uint32_t cif_up_ms      = comm_link_get_remote_uptime_ms();
+    uint8_t  cif_node_st    = comm_link_get_remote_node_state();
+    format_uptime(cif_up_ms, cif_up, sizeof(cif_up));
+
+    const comm_link_stats_t *stats = comm_link_get_stats();
+
+    // CAN status string
+    const char *can_str = (can_st == 1) ? "Running" :
+                          (can_st == 2) ? "Error"   : "Off";
+
+    // Link status string
+    const char *link_str = (link == COMM_LINK_CONNECTED) ? "OK" :
+                           (link == COMM_LINK_ERROR)     ? "Err" : "Down";
+
+    // Node state string
+    const char *node_str = (cif_node_st == 2) ? "Stream" :
+                           (cif_node_st == 1) ? "Scan"   : "Idle";
+
+    // SD status string
+    const char *sd_str = sd_ok ? "Mounted" : "No SD";
+
+    // Logger state
+    const char *log_state_str;
+    switch (log_st.state) {
+        case LOGGER_STATE_LOGGING: log_state_str = "Logging"; break;
+        case LOGGER_STATE_READY:   log_state_str = "Ready";   break;
+        case LOGGER_STATE_ERROR:   log_state_str = "Error";   break;
+        default:                   log_state_str = "Off";     break;
+    }
+
+    // ---- Format output ----
+    int pos = 0;
+    pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                    "-- Display Node --\n"
+                    "Heap %luK  Min %luK\n"
+                    "Up   %s\n",
+                    (unsigned long)dsp_heap, (unsigned long)dsp_min, dsp_up);
+
+    // SD + Logger line
+    if (sd_ok && log_st.sd_total_bytes > 0) {
+        float sd_free_gb = (float)log_st.sd_free_bytes / (1024.0f * 1024.0f * 1024.0f);
+        pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                        "SD   %.1fG free%s  %s\n",
+                        sd_free_gb,
+                        log_st.sd_low_space ? " LOW!" : "",
+                        log_state_str);
+    } else {
+        pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                        "SD   %s\n", sd_str);
+    }
+
+    if (log_st.state == LOGGER_STATE_LOGGING || log_st.rows_written > 0) {
+        pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                        "Log  %s  %lu rows\n",
+                        log_st.file_name[0] ? log_st.file_name : "--",
+                        (unsigned long)log_st.rows_written);
+    }
+
+    // CAN Interface section
+    pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                    "-- CAN Interface --\n");
+
+    if (link == COMM_LINK_CONNECTED) {
+        pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                        "Heap %uK  Up %s\n"
+                        "CAN  %s  Node %s\n",
+                        cif_heap, cif_up, can_str, node_str);
+    } else {
+        pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                        "UART %s\n", link_str);
+    }
+
+    // UART stats (always show)
+    pos += snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                    "UART %s  RX %lu  TX %lu",
+                    link_str,
+                    (unsigned long)stats->rx_frames,
+                    (unsigned long)stats->tx_frames);
+
+    if (stats->rx_errors > 0 || stats->tx_errors > 0) {
+        snprintf(info_buf + pos, sizeof(info_buf) - pos,
+                 "  Err %lu",
+                 (unsigned long)(stats->rx_errors + stats->tx_errors));
+    }
+
+    lv_label_set_text(s_sysinfo_label, info_buf);
+}
+
+/**
+ * @brief Cleanup system info timer when systemPanel is destroyed
+ */
+static void on_sys_panel_delete(lv_event_t *e)
+{
+    (void)e;
+    if (s_sysinfo_timer) {
+        lv_timer_del(s_sysinfo_timer);
+        s_sysinfo_timer = NULL;
+    }
+    s_sysinfo_label = NULL;
+    ESP_LOGD(TAG, "System info panel cleaned up");
 }
 
 // ============================================================================
@@ -818,6 +1106,7 @@ static void on_colorwheel_changed(lv_event_t *e)
 
 void ui_apply_theme_color(uint16_t color_raw)
 {
+    s_cached_theme_color = color_raw;
     lv_color_t c;
     c.full = color_raw;
 
@@ -829,7 +1118,7 @@ void ui_apply_theme_color(uint16_t color_raw)
     if (ui_gaugeText4) lv_obj_set_style_text_color(ui_gaugeText4, c, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // Button labels
-    if (ui_Label1) lv_obj_set_style_text_color(ui_Label1, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Connect" label
+    if (ui_Label1) lv_obj_set_style_text_color(ui_Label1, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Scan" label
     if (ui_Label2) lv_obj_set_style_text_color(ui_Label2, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Poll" label
     if (ui_Label3) lv_obj_set_style_text_color(ui_Label3, c, LV_PART_MAIN | LV_STATE_DEFAULT);  // "Settings" label
 
@@ -933,6 +1222,15 @@ uint16_t ui_load_theme_color(void)
 void wifiAPstart(lv_event_t * e)
 {
     (void)e;
-    ESP_LOGI(TAG, "WiFi AP start requested (not yet implemented)");
-    // TODO: wifi_manager_start() + QR code in ui_systemPanel
+    ESP_LOGI(TAG, "WiFi AP start requested");
+
+    if (wifi_manager_is_running()) {
+        ESP_LOGI(TAG, "WiFi AP already running — stopping");
+        wifi_manager_stop();
+    } else {
+        esp_err_t ret = wifi_manager_start();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "wifi_manager_start failed: %s", esp_err_to_name(ret));
+        }
+    }
 }

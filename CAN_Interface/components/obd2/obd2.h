@@ -30,6 +30,7 @@
 #define OBD2_MODE_CLEAR_DTC         0x04
 #define OBD2_MODE_PENDING_DTC       0x07
 #define OBD2_MODE_VEHICLE_INFO      0x09
+#define OBD2_MODE_PERMANENT_DTC     0x0A
 #define OBD2_MODE_EXTENDED          0x22
 
 // Response mode = request mode + 0x40
@@ -189,6 +190,30 @@ esp_err_t obd2_is_pid_supported(uint16_t pid, bool *supported);
 esp_err_t obd2_read_vin(char *vin_out, size_t buf_len);
 
 /**
+ * @brief Read ECU name (Mode 09 PID 0x0A)
+ * @param name_out Buffer for ECU name string (20 chars + null)
+ * @param buf_len Buffer length (should be >= 21)
+ * @return ESP_OK if ECU name retrieved
+ */
+esp_err_t obd2_read_ecu_name(char *name_out, size_t buf_len);
+
+/**
+ * @brief Read Calibration ID (Mode 09 PID 0x04)
+ * @param cal_id_out Buffer for CalID string (first 16 chars + null)
+ * @param buf_len Buffer length (should be >= 17)
+ * @return ESP_OK if CalID retrieved
+ */
+esp_err_t obd2_read_cal_id(char *cal_id_out, size_t buf_len);
+
+/**
+ * @brief Read Calibration Verification Number (Mode 09 PID 0x06)
+ * @param cvn_out Buffer for CVN hex string (first CVN as 8 hex chars + null)
+ * @param buf_len Buffer length (should be >= 9)
+ * @return ESP_OK if CVN retrieved
+ */
+esp_err_t obd2_read_cvn(char *cvn_out, size_t buf_len);
+
+/**
  * @brief Read stored DTCs (Mode 03)
  * @param dtc_array Array to store DTC codes (each is uint16_t)
  * @param max_dtcs Maximum DTCs to read
@@ -196,6 +221,32 @@ esp_err_t obd2_read_vin(char *vin_out, size_t buf_len);
  * @return ESP_OK if request successful
  */
 esp_err_t obd2_read_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count);
+
+/**
+ * @brief Read pending DTCs (Mode 07)
+ * @param dtc_array Array to store DTC codes (each is uint16_t)
+ * @param max_dtcs Maximum DTCs to read
+ * @param dtc_count Output: number of DTCs found
+ * @return ESP_OK if request successful
+ */
+esp_err_t obd2_read_pending_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count);
+
+/**
+ * @brief Read permanent DTCs (Mode 0A) - survive clear
+ * @param dtc_array Array to store DTC codes (each is uint16_t)
+ * @param max_dtcs Maximum DTCs to read
+ * @param dtc_count Output: number of DTCs found
+ * @return ESP_OK if request successful
+ */
+esp_err_t obd2_read_permanent_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count);
+
+/**
+ * @brief Read monitor status (PID 0x01) — MIL lamp + DTC count
+ * @param mil_on Output: true if MIL (check engine) is on
+ * @param dtc_count Output: number of emission DTCs flagged
+ * @return ESP_OK if request successful
+ */
+esp_err_t obd2_read_monitor_status(bool *mil_on, uint8_t *dtc_count);
 
 /**
  * @brief Clear DTCs (Mode 04)

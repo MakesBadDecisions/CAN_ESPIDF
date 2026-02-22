@@ -48,13 +48,14 @@ The Waveshare board also includes onboard peripherals: TCA9554 GPIO expander, QM
 | display_driver | `components/display_driver/` | RGB parallel LCD driver, LVGL integration, double-FB anti-tearing, ST7701S SPI init, PWM backlight, brightness API with NVS persistence |
 | touch_driver | `components/touch_driver/` | Touch input HAL — XPT2046 SPI resistive or CST820 I2C capacitive (compile-time selection) |
 | ui | `components/ui/` | SquareLine Studio generated LVGL screens, widgets, and custom event logic (settings, theme coloring, brightness, colorwheel) |
-| gauge_engine | `components/gauge_engine/` | Gauge data manager -- per-slot PID assignment, unit conversion, poll list aggregation, NVS persistence |
+| gauge_engine | `components/gauge_engine/` | Gauge data manager -- per-slot PID assignment, unit conversion, poll list aggregation, alert thresholds (warn/crit/max), NVS persistence |
 | data_logger | `components/data_logger/` | SD card CSV logging (SPI or SDMMC), session management, write buffering |
 | i2c_bus | `components/i2c_bus/` | Shared I2C bus manager for onboard peripherals (Waveshare) |
 | tca9554 | `components/tca9554/` | TCA9554 I2C GPIO expander — LCD/touch reset, SPI CS, SD D3, buzzer |
 | qmi8658 | `components/qmi8658/` | QMI8658 6-axis IMU — accel + gyro, orientation fusion, NVS calibration |
+| pcf85063 | `components/pcf85063/` | PCF85063A RTC — I2C real-time clock, UTC storage, NVS timezone, boot sync |
 | imu_display | `components/imu_display/` | IMU bubble visualization — pitch/roll dot + G-force labels in LVGL panel |
-| wifi_manager | `components/wifi_manager/` | WiFi AP, HTTP server, REST API, full web config portal |
+| wifi_manager | `components/wifi_manager/` | WiFi AP, HTTP server, REST API, alert threshold config, full web config portal |
 | system | `components/system/` | Logging wrapper, NVS init, timing utilities |
 
 Shared definitions used by both nodes live in `../shared/`:
@@ -94,6 +95,7 @@ CAN_Display/
     ├── i2c_bus/            # Shared I2C bus manager
     ├── tca9554/            # TCA9554 GPIO expander driver
     ├── qmi8658/            # QMI8658 6-axis IMU driver (fusion, NVS cal)
+    ├── pcf85063/           # PCF85063A RTC driver (UTC, NVS timezone)
     ├── imu_display/        # IMU bubble visualization for LVGL
     ├── wifi_manager/       # WiFi AP, REST API, web config portal
     ├── system/             # Logging, NVS, timing
@@ -118,7 +120,7 @@ Touch reads are isolated on Core 0 to prevent stalling the LCD DMA ISR.
 
 | Task | Core | Priority | Purpose |
 |------|------|----------|---------|
-| WiFi/Config | 0 | 1 | HTTP server for log download and config |
+
 | System Monitor | 0 | 0 | Heap usage, watchdog, health reporting |
 
 Data logging runs inline in the LVGL timer callback (gauge_update_cb) — no separate task needed. Buffered writes (4KB) minimize SD card I/O overhead.
@@ -220,6 +222,11 @@ The actual boot sequence as implemented in `main.c`:
      - Loads saved calibration from NVS, or performs 2s live calibration
      - Saves new calibration to NVS on completion
 
+0.7 PCF85063 RTC (if present)
+   - pcf85063_init() — detect chip, clear STOP/OS bits, load TZ from NVS
+   - pcf85063_sync_to_system() — read RTC → settimeofday() (sanity check >2020)
+   - On first boot (no battery), time remains unset until portal sync
+
 1. display_init()
    - [Waveshare] ST7701S SPI init (39 commands), PWM backlight via LEDC
      - Backlight NVS restore: loads brightness % from "display"/"bl_pct"
@@ -276,13 +283,14 @@ All persistent settings are stored in ESP-IDF NVS (Non-Volatile Storage):
 | `imu_cal` | `R_matrix` | blob | — | qmi8658 (Rodrigues rotation) |
 | `imu_cal` | `valid` | u8 | 0 | qmi8658 (calibration flag) |
 | `gauge_cfg` | `slot0`..`slot19` | blob | — | gauge_engine (pid_id + unit per slot) |
+| `gauge_cfg` | `alerts` | blob | — | gauge_engine (alert thresholds: warn/crit/max per PID) |
 | `vehicle` | `vin` | str | "" | comm_link (last known VIN) |
 | `vehicle` | `ecu_count` | u8 | 0 | comm_link |
 | `touch_cal` | `x_min`, `x_max`, etc. | u16 | header defaults | touch_driver |
-| `logger` | `file_counter` | u32 | 0 | data_logger (sequential filename) |
 | `display` | `splash_ms` | u32 | 3000 | boot_splash (splash duration ms) |
 | `display` | `bl_pct` | u8 | 100 | display_driver (backlight brightness %) |
 | `display` | `theme` | u16 | 0x34DB | ui_events (theme color RGB565) |
+| `rtc` | `tz_off` | i16 | 0 | pcf85063 (timezone offset in minutes from UTC) |
 
 ## Settings Screen (Screen2)
 
@@ -291,8 +299,8 @@ The Settings Screen is accessed via the settings button on Screen1. It provides:
 - **Brightness Slider**: Adjusts PWM backlight (Waveshare) or GPIO on/off (CrowPanel). Value persisted to NVS immediately on change.
 - **Color Wheel**: Dynamic LVGL colorwheel for selecting theme color. Hex label (#RRGGBB) shows current color in the center. Saved to NVS on every drag.
 - **Theme Coloring**: Selected color is applied as text color to all labels and border color to all interactive widgets (buttons, panels, gauge borders, dropdowns) across both Screen1 and Screen2.
-- **WiFi AP Button**: Placeholder for WiFi Manager activation (not yet implemented).
-- **System Panel**: Placeholder for system info display.
+- **WiFi AP Button**: Starts WiFi AP, shows QR code screen for phone connection to captive portal.
+- **System Panel**: Live system info — Display heap/min/uptime, SD card and logger status, CAN Interface remote stats (heap, uptime, node state via heartbeat), UART frame stats. Refreshed every 1 second.
 
 ### SquareLine Integration Notes 
 

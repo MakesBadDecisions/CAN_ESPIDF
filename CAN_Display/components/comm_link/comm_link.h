@@ -23,6 +23,7 @@
 #define COMM_LINK_TX_QUEUE_LEN  16
 #define COMM_LINK_RX_BUFFER     2048
 #define COMM_LINK_PID_STORE_MAX 64          // Max cached PID values
+#define COMM_LINK_DTC_STORE_MAX MAX_DTCS    // Max cached DTCs (32)
 #define PID_META_STORE_MAX      96          // Max PID metadata entries (RAM only)
 #define PID_STALE_TIMEOUT_MS    3000        // PID data older than this is stale
 
@@ -84,6 +85,12 @@ typedef struct {
  */
 typedef void (*comm_pid_callback_t)(const comm_pid_value_t *pid);
 
+/**
+ * @brief Callback for DTC read completion
+ * @param count Number of DTCs received (0 = no DTCs or clear confirmed)
+ */
+typedef void (*comm_dtc_callback_t)(uint8_t count);
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -114,6 +121,24 @@ comm_link_state_t comm_link_get_state(void);
  * @return 0=bus off, 1=bus on, 2=error
  */
 uint8_t comm_link_get_can_status(void);
+
+/**
+ * @brief Get remote free heap from Interface heartbeat
+ * @return Free heap in KB, or 0 if no heartbeat received yet
+ */
+uint16_t comm_link_get_remote_heap_kb(void);
+
+/**
+ * @brief Get remote uptime from Interface heartbeat
+ * @return Uptime in milliseconds, or 0 if no heartbeat received yet
+ */
+uint32_t comm_link_get_remote_uptime_ms(void);
+
+/**
+ * @brief Get remote node state from Interface heartbeat
+ * @return 0=idle, 1=scanning, 2=streaming
+ */
+uint8_t comm_link_get_remote_node_state(void);
 
 /**
  * @brief Get link statistics
@@ -216,6 +241,54 @@ esp_err_t comm_link_set_poll_list(const uint16_t *pids, uint8_t count, uint8_t r
  * @brief Stop polling (clear poll list)
  */
 esp_err_t comm_link_clear_poll_list(void);
+
+/**
+ * @brief Check if a poll list is currently active
+ */
+bool comm_link_has_poll_list(void);
+
+/**
+ * @brief Check if a specific PID is in the active poll list
+ * @param pid_id PID to check
+ * @return true if polled (or no poll list is active — unfiltered)
+ */
+bool comm_link_is_pid_polled(uint16_t pid_id);
+
+// ============================================================================
+// DTC API
+// ============================================================================
+
+/**
+ * @brief Request DTC read from Interface (sends CMD_READ_DTCS)
+ * @param callback Function to call when DTC list received (NULL for fire-and-forget)
+ * @return ESP_OK if request sent
+ */
+esp_err_t comm_link_request_dtcs(comm_dtc_callback_t callback);
+
+/**
+ * @brief Request DTC clear from Interface (sends CMD_CLEAR_DTCS)
+ * @param callback Function to call when clear confirmation received (NULL for fire-and-forget)
+ * @return ESP_OK if request sent
+ */
+esp_err_t comm_link_clear_dtcs(comm_dtc_callback_t callback);
+
+/**
+ * @brief Get cached DTC list
+ * @param out_dtcs Output array (caller provides, min COMM_LINK_DTC_STORE_MAX entries)
+ * @param max_count Maximum entries to return
+ * @return Number of valid DTCs (0 if none)
+ */
+int comm_link_get_dtcs(comm_dtc_entry_t *out_dtcs, int max_count);
+
+/**
+ * @brief Get cached DTC count
+ */
+int comm_link_get_dtc_count(void);
+
+/**
+ * @brief Check if DTC data is valid (has been received at least once)
+ */
+bool comm_link_has_dtc_data(void);
 
 // ============================================================================
 // PID Metadata API (populated from scan, stored in RAM)

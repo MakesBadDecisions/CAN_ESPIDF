@@ -15,6 +15,7 @@
 
 #include "gauge_engine.h"
 #include "comm_link.h"
+#include "pid_store.h"
 #include "pid_types.h"
 #include "device.h"
 #include "esp_log.h"
@@ -44,6 +45,7 @@ static bool             s_polling = false;
 static uint8_t          s_poll_rate_hz = 10;
 static bool             s_suppress_save = false;  // true during load_config
 static volatile bool    s_data_ready = false;     // set by PID callback, cleared by update
+static volatile bool    s_pid_opts_dirty = false;  // set when poll list changes, cleared by UI
 
 #define LOCK()   xSemaphoreTake(s_mutex, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_mutex)
@@ -54,6 +56,63 @@ typedef struct __attribute__((packed)) {
     uint8_t     display_unit;   // pid_unit_t cast to u8
     uint8_t     reserved;       // alignment / future use
 } nvs_slot_record_t;
+
+// ============================================================================
+// Alert Threshold Storage
+// ============================================================================
+
+static pid_alert_config_t s_alerts[ALERT_MAX_ENTRIES];
+static int s_alert_count = 0;
+
+#define NVS_KEY_ALERTS "alerts"
+
+/** Find alert config for a PID (NULL if none) */
+static const pid_alert_config_t *find_alert(uint16_t pid_id)
+{
+    for (int i = 0; i < s_alert_count; i++) {
+        if (s_alerts[i].pid_id == pid_id) return &s_alerts[i];
+    }
+    return NULL;
+}
+
+/** Evaluate alert level + blend progress for a value against thresholds */
+static void evaluate_alert(float value, const pid_alert_config_t *a,
+                           alert_level_t *out_level, float *out_progress)
+{
+    *out_level = ALERT_NONE;
+    *out_progress = 0.0f;
+    if (!a || (a->warn == 0.0f && a->crit == 0.0f && a->max == 0.0f)) return;
+
+    bool ascending = (a->warn <= a->crit);
+
+    if (ascending) {
+        // High values are dangerous (temp, RPM, boost)
+        if (a->max > 0.0f && value >= a->max) {
+            *out_level = ALERT_MAX;
+            *out_progress = 1.0f;
+        } else if (value >= a->crit) {
+            *out_level = ALERT_CRITICAL;
+            *out_progress = 1.0f;
+        } else if (value >= a->warn) {
+            *out_level = ALERT_WARN;
+            float range = a->crit - a->warn;
+            *out_progress = (range > 0.0f) ? (value - a->warn) / range : 0.5f;
+        }
+    } else {
+        // Inverted: low values are dangerous (oil pressure, voltage)
+        if (a->max > 0.0f && value <= a->max) {
+            *out_level = ALERT_MAX;
+            *out_progress = 1.0f;
+        } else if (value <= a->crit) {
+            *out_level = ALERT_CRITICAL;
+            *out_progress = 1.0f;
+        } else if (value <= a->warn) {
+            *out_level = ALERT_WARN;
+            float range = a->warn - a->crit;
+            *out_progress = (range > 0.0f) ? (a->warn - value) / range : 0.5f;
+        }
+    }
+}
 
 // ============================================================================
 // Helpers
@@ -94,6 +153,9 @@ esp_err_t gauge_engine_init(void)
     }
     s_polling = false;
     UNLOCK();
+
+    // Load alert thresholds from NVS
+    gauge_engine_load_alerts();
 
     ESP_LOGI(TAG, "Gauge engine initialized (%d slots)", GAUGE_MAX_SLOTS);
     return ESP_OK;
@@ -432,6 +494,9 @@ int gauge_engine_build_pid_options(char *buf, int buf_len)
         const char *name = comm_link_get_pid_name(pid_id);
         if (pid_id == 0xFFFF || !name) continue;
 
+        // When a PID selection exists, only include selected PIDs
+        if (pid_store_has_selection() && !pid_store_is_selected(pid_id)) continue;
+
         if (count > 0) {
             pos += snprintf(buf + pos, buf_len - pos, "\n");
         }
@@ -451,6 +516,25 @@ int gauge_engine_build_pid_options(char *buf, int buf_len)
 #endif
 
     return count;
+}
+
+void gauge_engine_set_pid_options_changed_cb(void (*cb)(void))
+{
+    (void)cb; // Not used — flag-based approach for thread safety
+}
+
+void gauge_engine_notify_pid_options_changed(void)
+{
+    s_pid_opts_dirty = true;
+}
+
+bool gauge_engine_pid_options_dirty(void)
+{
+    if (s_pid_opts_dirty) {
+        s_pid_opts_dirty = false;
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -543,7 +627,17 @@ esp_err_t gauge_engine_rebuild_poll_list(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = comm_link_set_poll_list(pids, count, s_poll_rate_hz);
+    esp_err_t err;
+
+    // If pid_store has a user selection, pollCAN() already sent the full list
+    // to comm_link — don't overwrite it with the smaller gauge-slot subset.
+    if (pid_store_has_selection()) {
+        ESP_LOGI(TAG, "Poll list managed by pid_store (%d PIDs) — gauge engine has %d CAN slots",
+                 pid_store_get_count(), count);
+        return ESP_OK;
+    }
+
+    err = comm_link_set_poll_list(pids, count, s_poll_rate_hz);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Poll list rebuilt: %d unique PIDs @ %d Hz",
                  count, s_poll_rate_hz);
@@ -616,6 +710,8 @@ int gauge_engine_update(void)
                 g->stale = true;
                 strcpy(g->value_str, "---");
             }
+            g->alert_level = ALERT_NONE;
+            g->alert_progress = 0.0f;
             continue;
         }
 
@@ -631,11 +727,152 @@ int gauge_engine_update(void)
 
         snprintf(g->value_str, GAUGE_VALUE_STR_LEN, "%.1f", g->display_value);
         g->value_valid = true;
+
+        // Evaluate alert thresholds against display_value (unit-agnostic —
+        // thresholds are entered in whatever unit the user sees on screen)
+        evaluate_alert(g->display_value, find_alert(g->pid_id),
+                       &g->alert_level, &g->alert_progress);
+
         g->last_update_tick = xTaskGetTickCount();
         updated++;
     }
     UNLOCK();
 
     return updated;
+}
+
+// ============================================================================
+// Alert Threshold API
+// ============================================================================
+
+esp_err_t gauge_engine_set_alert(uint16_t pid_id, float warn, float crit, float max)
+{
+    LOCK();
+
+    // Find existing entry
+    int idx = -1;
+    for (int i = 0; i < s_alert_count; i++) {
+        if (s_alerts[i].pid_id == pid_id) { idx = i; break; }
+    }
+
+    // Clear entry if all zeros
+    if (warn == 0.0f && crit == 0.0f && max == 0.0f) {
+        if (idx >= 0) {
+            s_alerts[idx].pid_id = 0xFFFF;
+            s_alerts[idx].warn = 0;
+            s_alerts[idx].crit = 0;
+            s_alerts[idx].max  = 0;
+        }
+        UNLOCK();
+        return ESP_OK;
+    }
+
+    // Allocate new entry if needed
+    if (idx < 0) {
+        for (int i = 0; i < ALERT_MAX_ENTRIES; i++) {
+            if (s_alerts[i].pid_id == 0xFFFF) { idx = i; break; }
+        }
+        if (idx < 0) {
+            UNLOCK();
+            ESP_LOGW(TAG, "Alert table full (%d)", ALERT_MAX_ENTRIES);
+            return ESP_ERR_NO_MEM;
+        }
+        if (idx >= s_alert_count) s_alert_count = idx + 1;
+    }
+
+    s_alerts[idx].pid_id = pid_id;
+    s_alerts[idx].warn   = warn;
+    s_alerts[idx].crit   = crit;
+    s_alerts[idx].max    = max;
+    s_alerts[idx]._pad   = 0;
+
+    UNLOCK();
+
+    ESP_LOGI(TAG, "Alert: PID 0x%04X warn=%.1f crit=%.1f max=%.1f",
+             pid_id, warn, crit, max);
+    return ESP_OK;
+}
+
+bool gauge_engine_get_alert(uint16_t pid_id, float *warn, float *crit, float *max)
+{
+    LOCK();
+    const pid_alert_config_t *a = find_alert(pid_id);
+    if (!a) {
+        UNLOCK();
+        return false;
+    }
+    if (warn) *warn = a->warn;
+    if (crit) *crit = a->crit;
+    if (max)  *max  = a->max;
+    UNLOCK();
+    return true;
+}
+
+esp_err_t gauge_engine_clear_alert(uint16_t pid_id)
+{
+    return gauge_engine_set_alert(pid_id, 0, 0, 0);
+}
+
+esp_err_t gauge_engine_save_alerts(void)
+{
+    pid_alert_config_t packed[ALERT_MAX_ENTRIES];
+    int count = 0;
+
+    LOCK();
+    for (int i = 0; i < ALERT_MAX_ENTRIES; i++) {
+        if (s_alerts[i].pid_id != 0xFFFF &&
+            (s_alerts[i].warn != 0.0f || s_alerts[i].crit != 0.0f ||
+             s_alerts[i].max != 0.0f)) {
+            packed[count++] = s_alerts[i];
+        }
+    }
+    UNLOCK();
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open for alerts: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    if (count == 0) {
+        nvs_erase_key(handle, NVS_KEY_ALERTS);
+        err = ESP_OK;
+    } else {
+        err = nvs_set_blob(handle, NVS_KEY_ALERTS, packed,
+                           count * sizeof(pid_alert_config_t));
+    }
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+
+    ESP_LOGI(TAG, "Alert config saved: %d PIDs", count);
+    return err;
+}
+
+int gauge_engine_load_alerts(void)
+{
+    // Clear all entries
+    for (int i = 0; i < ALERT_MAX_ENTRIES; i++) {
+        s_alerts[i].pid_id = 0xFFFF;
+        s_alerts[i].warn = 0;
+        s_alerts[i].crit = 0;
+        s_alerts[i].max  = 0;
+    }
+    s_alert_count = 0;
+
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return 0;
+
+    size_t len = sizeof(s_alerts);
+    esp_err_t err = nvs_get_blob(handle, NVS_KEY_ALERTS, s_alerts, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || len < sizeof(pid_alert_config_t)) return 0;
+
+    s_alert_count = (int)(len / sizeof(pid_alert_config_t));
+    if (s_alert_count > ALERT_MAX_ENTRIES) s_alert_count = ALERT_MAX_ENTRIES;
+
+    ESP_LOGI(TAG, "Loaded %d alert configs from NVS", s_alert_count);
+    return s_alert_count;
 }
 

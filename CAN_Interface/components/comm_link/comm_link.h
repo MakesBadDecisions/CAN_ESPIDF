@@ -104,9 +104,10 @@ esp_err_t comm_link_send_heartbeat(void);
 /**
  * @brief Send DTC list
  * @param dtcs Array of raw DTC codes
+ * @param types Array of DTC types (0=stored, 1=pending, 2=permanent), NULL for all-stored
  * @param count Number of DTCs
  */
-esp_err_t comm_link_send_dtcs(const uint16_t *dtcs, uint8_t count);
+esp_err_t comm_link_send_dtcs(const uint16_t *dtcs, const uint8_t *types, uint8_t count);
 
 /**
  * @brief Send vehicle info (VIN)

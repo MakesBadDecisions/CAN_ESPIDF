@@ -11,8 +11,8 @@ Phase 1 used an **MCP2515** SPI CAN controller (proven on vehicle). The **MCP251
 - **CAN bus communication** -- Talk to the vehicle via MCP2518FD (current primary, SPI2, CAN 2.0 classic mode) or MCP2515 (Phase 1 fallback). Waveshare 2-CH CAN FD HAT supports dual-channel CAN-FD for future expansion. TWAI reserved for 1-Wire GM legacy networks.
 - **OBD-II protocol** -- Build Mode 01/02 requests, parse single-frame and ISO-TP multi-frame responses, handle flow control.
 - **PID decode** -- Look up 165 PIDs (standard OBD-II 0x00--0xA4 plus GM extended 0x83F--0x4268) in a const table and apply formula-based decoding to produce engineering values with units.
-- **Smart polling** -- Schedule PID requests using priority tiers and adaptive intervals so high-value PIDs update fast while low-priority PIDs share remaining bandwidth.
-- **Diagnostics** -- Read and clear DTCs (Mode 03/07), UDS service 0x19 extended diagnostics, VIN/CVN/ECU info retrieval.
+- **Smart polling** -- Schedule PID requests using priority tiers with round-robin fairness so all selected PIDs get serviced. ~45ms per PID, ~900ms full rotation with 20 PIDs at ~1.1 Hz each.
+- **Diagnostics** -- Read and clear DTCs (Mode 03/07/0A stored+pending+permanent with dedup merge), MIL status (PID 0x01), DTC type bitmask (stored|pending|permanent), VIN/ECU name/CalID/CVN retrieval (Mode 09 PIDs 0x02/0x0A/0x04/0x06), UDS service 0x19 extended diagnostics.
 - **UART TX** -- Batch decoded PID values and send them to the Display Node over UART1 (2Mbps, USB-C cable).
 - **System health** -- Watchdog feeding, bus-off recovery, heap monitoring, uptime and error statistics.
 
@@ -36,8 +36,8 @@ All components live under `components/`. Each is a self-contained ESP-IDF compon
 | CAN Driver     | `can_driver/`    | Hardware abstraction layer. MCP2518FD backend (current primary, FIFO-based SPI, CAN 2.0 classic), MCP2515 backend (Phase 1 fallback), TWAI backend (1-Wire GM legacy). Unified API for open/close/send/receive regardless of backend. |
 | PID Database   | `pid_db/`        | Pure C `const` table of 165 PID entries. Each entry holds the PID number, name, formula coefficients, unit string, min/max, and byte length. Provides a lookup function and unit conversion helpers. |
 | OBD-II Stack   | `obd2/`          | OBD-II protocol implementation. Request builder (Mode + PID -> CAN frame), response parser, ISO-TP segmentation and reassembly, flow control frame generation. |
-| Diagnostics    | `diagnostics/`   | DTC manager (Mode 03 read, Mode 04 clear, Mode 07 pending). UDS processor (service 0x19 extended DTC, 0x22 DID read). Vehicle info: VIN (Mode 09 PID 02), calibration verification numbers, ECU identification. |
-| Poll Engine    | `poll_engine/`   | Priority-based scheduler. Maintains a sorted run queue of PID poll jobs with configurable priority (0--7), base interval, and adaptive backoff. Feeds requests to the OBD-II stack and tracks response latency. |
+| Diagnostics    | `diagnostics/`   | DTC manager (Mode 03 stored, Mode 04 clear, Mode 07 pending, Mode 0A permanent — dedup merge with type bitmask). MIL status (PID 0x01 MIL + emission DTC count). Vehicle info: VIN (PID 0x02), ECU name (PID 0x0A), CalID (PID 0x04), CVN (PID 0x06). UDS processor (service 0x19, 0x22). |
+| Poll Engine    | `poll_engine/`   | Priority-based scheduler with round-robin fairness. Maintains a run queue of PID poll jobs with configurable priority (1--5), base interval, and round-robin index tracking to prevent starvation. Adaptive backoff available but disabled by default. Feeds requests to the OBD-II stack and tracks response latency. ~45ms per PID, ~1.1 Hz per-PID rate with 20 active PIDs. |
 | Comm Link      | `comm_link/`     | UART transmit layer. Batches decoded PID values into UART frames, handles framing, sequence numbers, and CRC. Sends to Display Node over UART1 at 2Mbps via USB-C cable. |
 | WiFi AP        | `wifi_ap/`       | **Removed** -- WiFi AP and HTTP config server have moved to the Display Node. The CAN Interface Node is a headless backend. |
 | System         | `system/`        | Logging wrapper (tagged, leveled), NVS configuration read/write, timing utilities (microsecond timestamps, interval helpers), and task management (stack high-water-mark checks, task list). |
@@ -51,7 +51,7 @@ All tasks are pinned to a specific core. Core 1 handles time-critical CAN work. 
 | Task                | Core | Priority | Period   | Stack  | Description                                                                                  |
 | ------------------- | ---- | -------- | -------- | ------ | -------------------------------------------------------------------------------------------- |
 | CAN Processing      | 1    | 5        | 5 ms     | 4096 B | Receive CAN frames from the driver queue, pass to OBD-II parser, decode via PID DB, update the shared PID value store. Handles ISO-TP reassembly and flow control responses. |
-| Poll Engine         | 1    | 4        | 10 ms    | 3072 B | Walk the priority-sorted run queue, check which PIDs are due, build OBD-II request frames, submit to the CAN driver TX queue. Update adaptive intervals based on response success/failure. |
+| Poll Engine         | 1    | 4        | 10 ms    | 3072 B | Walk the priority-sorted run queue with round-robin fairness, check which PIDs are due, build OBD-II request frames, submit to the CAN driver TX queue. 1-tick yield between polls (obd2_request_pid is blocking ~25-35ms). |
 | Comm Link           | 0    | 3        | 20 ms    | 3072 B | Snapshot the PID value store, batch changed values into UART frames, transmit to Display Node over UART1. Handle TX completion and detect link up/down. |
 | System Monitor      | 0    | 0        | 1000 ms  | 2048 B | Feed the task watchdog. Log heap free, stack high-water marks, CAN error counters, bus state, UART TX stats. Trigger bus-off recovery if needed. |
 

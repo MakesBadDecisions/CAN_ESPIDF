@@ -39,7 +39,7 @@ s,°C,%,km/h,°C
 ```
 
 ### Header Sections
-- **Log Information**: Creation time (elapsed since boot)
+- **Log Information**: Creation time (local time from RTC + timezone)
 - **Vehicle Information**: VIN from comm_link (stored in NVS)
 - **Channel Information**: 3 rows — PID numbers (decimal), names from pid_db, units from pid_db. When HAS_IMU is defined, appends PID 65280 (Lateral G) and 65281 (Longitudinal G) with "G" units.
 - **Channel Data**: Time offset (seconds, 3dp) + raw values per poll cycle. IMU columns appended with `%.4f` precision.
@@ -52,14 +52,23 @@ s,°C,%,km/h,°C
 
 ## File Naming
 
-Sequential naming persisted across reboots via NVS:
+Timestamp-based naming using RTC local time (8.3 FAT compatible, no NVS counter):
 ```
-/sdcard/logs/log1.csv
-/sdcard/logs/log2.csv
-/sdcard/logs/log3.csv
+/sdcard/logs/02211832.csv    (Feb 21 at 6:32 PM)
+/sdcard/logs/02220915.csv    (Feb 22 at 9:15 AM)
 ```
 
-File sequence number stored in NVS namespace `"logger"`, key `"filenum"`.
+Format: `MMDDHHMM.csv` — local time derived from system clock + NVS timezone offset.
+Erasing the SD card naturally starts fresh since no external counter is needed.
+
+## Storage Monitoring
+
+SD card free space is queried via `statvfs()` on each `logger_get_status()` call.
+The `sd_low_space` flag is set when free space drops below `LOGGER_LOW_SPACE_MB` (50MB).
+The "LOW!" warning appears on:
+- System Info panel (Screen2)
+- `/api/sd` JSON response (`low_space: true`)
+- Portal Status page (SD card section)
 
 ## SD Card Interface
 

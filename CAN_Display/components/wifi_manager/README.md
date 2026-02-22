@@ -13,9 +13,11 @@ After the client connects, a second QR code appears with the portal URL.
 This two-stage QR flow is modeled on the proven ToolTruck OTA implementation
 (`C:\Users\TEOLA\Documents\Projects\ToolTruckESPIDF\main\ota\`).
 
-## Status: STUB — Implementation Phases Below
+## Status: Phases 1–6 Complete, Alert Thresholds Done
 
-Only `wifi_manager_init()` and `wifi_manager_start()` exist as stubs.
+WiFi AP, QR code flow, HTTP server, REST API (status, logs, gauges, config, PIDs, time sync,
+vehicle scan, DTC read/clear), and full embedded HTML portal (Status/Vehicle/Logs/PIDs/Workshop/Settings)
+are all implemented and running on hardware.
 
 ---
 
@@ -327,43 +329,70 @@ calls — no page reloads.
 ### Phase 5: CAN Interface Proxy
 Relay commands to the CAN Interface Node over UART via comm_link.
 
-**Files**: `can_proxy_handler.c`
+**Files**: `scan_handler.c` (all CAN proxy endpoints)
 
 | Task | API Used | Notes |
 |------|----------|-------|
 | Get CAN status | `comm_link_get_can_status()`, heartbeat data | CAN bus on/off/error |
-| Trigger scan | `comm_link_request_scan()` | Async, poll scan_status |
-| Get vehicle info | `comm_link_get_vehicle_info()` | VIN, ECU count, supported PIDs |
-| Set poll list | `comm_link_set_poll_list()` | From web UI |
-| Read DTCs | CONFIG_CMD `CMD_READ_DTCS` via comm_link | Future |
-| Clear DTCs | CONFIG_CMD `CMD_CLEAR_DTCS` via comm_link | Future |
+| Trigger scan | `comm_link_request_scan()` | Async, poll scan_status — **DONE** |
+| Get vehicle info | `comm_link_get_vehicle_info()` | VIN, ECU count, supported PIDs — **DONE** |
+| Set poll list | `comm_link_set_poll_list()` | From web UI — **DONE** |
+| Read DTCs | `comm_link_request_dtcs()` | CMD_READ_DTCS → diagnostics_read_dtcs — **DONE** |
+| Clear DTCs | `comm_link_clear_dtcs()` | CMD_CLEAR_DTCS → diagnostics_clear_dtcs — **DONE** |
 
-**API endpoints (Phase 5)**:
+**API endpoints (scan_handler.c — DONE)**:
 ```
-GET  /api/can/status        → { can_status, node_state, uptime, free_heap }
-POST /api/can/scan          → trigger scan → { status: "in_progress" }
-GET  /api/can/scan          → { status, vin, ecu_count, pid_count }
-GET  /api/can/vehicle       → { vin, protocol, supported_pids: [...] }
-POST /api/can/poll          → { pids: [0x010C, 0x010D], rate_hz: 10 }
-DELETE /api/can/poll        → clear poll list
+POST /api/can/scan          → trigger vehicle scan → { ok, status: "in_progress" }
+GET  /api/can/vehicle       → { status, vin, protocol, ecu_count, pid_count, dtc_count, mil_status, emission_dtc_count, ecu_name, cal_id, cvn, has_info }
+GET  /api/can/dtcs          → { has_data, count, dtcs: [{code, raw, type, system}, ...] }
+POST /api/can/dtcs/read     → trigger DTC read → { ok, status: "reading" }
+POST /api/can/dtcs/clear    → trigger DTC clear → { ok, status: "clearing" }
 ```
+
+**API endpoints (Alert Thresholds — DONE)**:
+```
+GET  /api/pids              → (extended) each PID now includes warn, crit, max fields
+POST /api/pids/alerts       → { alerts: [{id, warn, crit, max}, ...] } — save thresholds to NVS
+```
+
+Portal UI: PID table has Warn/Crit/Max number input columns + "Alerts" save button.
+Visual effects: yellow→red gradient border in warn zone, flashing red border + red text in critical zone, theme color restore on normal.
 
 ---
 
-### Phase 6+ (Future / Deferred)
+### Phase 6: Vehicle Tab + DTC — **DONE**
+
+| Feature | Phase | Status |
+|---------|-------|--------|
+| Vehicle tab in portal | 6 | **DONE** — VIN, ECU count, protocol, ECU name, CalID, CVN, MIL indicator, scan button |
+| DTC viewer / clear | 6 | **DONE** — table with code/system/type, Read/Clear buttons |
+| DTC comm_link API | 6 | **DONE** — request_dtcs, clear_dtcs, get_dtcs, get_dtc_count |
+| CAN_Interface DTC handling | 6 | **DONE** — CMD_READ_DTCS/CMD_CLEAR_DTCS in main.c cmd_callback |
+| Wire format fix | 6 | **DONE** — comm_link_send_dtcs uses comm_dtc_list_t (was ad-hoc) |
+| Tests / bi-directional | 6+ | Future scope |
+
+### Phase 7: IMU Setup Tab
 
 | Feature | Phase | Dependency |
 |---------|-------|------------|
-| DTC viewer / clear | 6 | `CMD_READ_DTCS`/`CMD_CLEAR_DTCS` in comm_protocol |
-| Custom PID editor | 6 | New PID storage in NVS, formula engine |
-| Custom math channels | 6 | Virtual PID extension (VPID 0xFF01+) |
-| Freeze frame viewer | 6 | New comm_protocol message type |
-| CAN bitrate change | 6 | New CONFIG_CMD + CAN Interface handler |
-| Vehicle profiles | 7 | NVS profile storage keyed by VIN |
-| Alert thresholds | 7 | gauge_engine threshold fields + UI |
-| Display themes | 8 | LVGL style system, NVS-persisted |
-| WebSocket live data | 8 | Alternative to polling /api/status |
-| Hardware addon config | 8 | IMU cal, sensor offsets, buzzer/LED |
+| IMU Setup tab | 7 | Calibration, G range config |
+| Configurable G range | 7 | Adjustable ±G mapping |
+| Direction-of-travel cal | 7 | Forward vector from sustained straight-line driving |
+
+### Phase 8+ (Future / Deferred)
+
+| Feature | Phase | Dependency |
+|---------|-------|------------|
+| Custom PID editor | 8+ | New PID storage in NVS, formula engine |
+| Custom math channels | 8+ | Virtual PID extension (VPID 0xFF01+) |
+| Freeze frame viewer | 8+ | New comm_protocol message type |
+| CAN bitrate change | 8+ | New CONFIG_CMD + CAN Interface handler |
+| Vehicle profiles | 8+ | NVS profile storage keyed by VIN, standard defaults |
+| ~~Alert thresholds~~ | ~~7~~ | **DONE** -- warn/crit/max per PID, POST /api/pids/alerts, NVS blob, visual effects (gradient + flash) |
+| ~~Display themes~~ | ~~8~~ | **DONE** -- basic theme coloring via colorwheel, NVS-persisted |
+| WebSocket live data | 8+ | Alternative to polling /api/status |
+| OTA update | 8+ | Display via AP, CAN Interface via UART command (map workflow first) |
+| Buzzer integration | next | TCA9554 EXIO8, trigger on MAX alert |
 
 ---
 
@@ -373,19 +402,19 @@ DELETE /api/can/poll        → clear poll list
 wifi_manager/
 ├── README.md               # This file
 ├── CMakeLists.txt          # Component build config
+├── wifi_internal.h         # Internal API (handler registration prototypes)
 ├── wifi_manager.h          # Public API (init, start, stop, QR data, credentials)
 ├── wifi_manager.c          # Top-level init, NVS load, state machine
 ├── wifi_ap.c               # WiFi SoftAP setup, DHCP, client event handlers
 ├── qr_screen.c             # LVGL QR code screen (WiFi stage + URL stage)
-├── http_server.c           # httpd_start, route registration, static files
+├── http_server.c           # httpd_start, route registration
 ├── status_handler.c        # GET /api/status — system info JSON
-├── log_handler.c           # GET/DELETE /api/logs — file list, download, delete
-├── config_handler.c        # GET/POST /api/config/* — gauges, splash, backlight
-├── can_proxy_handler.c     # GET/POST /api/can/* — CAN node proxy over UART
-└── www/                    # HTML/CSS/JS source (compiled to C arrays)
-    ├── index.html
-    ├── style.css
-    └── app.js
+├── log_handler.c           # GET/DELETE /api/logs, GET /api/sd — file list, download, delete
+├── config_handler.c        # GET/POST /api/config/* — gauges, splash, backlight, wifi, autopoll
+├── pid_handler.c           # GET /api/pids, GET/POST /api/pids/poll, POST /api/pids/alerts — PID browser + poll + alert thresholds
+├── portal_handler.c        # GET / — embedded HTML SPA (Status/Vehicle/Logs/PIDs/Workshop/Settings tabs)
+├── time_handler.c          # POST /api/settime, GET /api/time — client time sync + RTC write
+└── scan_handler.c          # /api/can/* — scan, vehicle info, DTC read/clear (5 endpoints)
 ```
 
 ## Public API
@@ -474,6 +503,7 @@ esp_err_t wifi_manager_set_auto_start(bool enable);
 | `comm_link` | UART link stats, vehicle info, scan, poll list |
 | `boot_splash` | Splash duration get/set |
 | `system` | Heap, uptime, NVS access |
+| `pcf85063` | RTC time set/get for time_handler |
 | `devices` | `HAS_*` capability flags |
 | `nvs_flash` | WiFi settings persistence |
 
@@ -483,8 +513,7 @@ esp_err_t wifi_manager_set_auto_start(bool enable);
 |-----------|------|-------|
 | `wifi` | `ssid`, `pass`, `channel`, `ap_on` | wifi_manager |
 | `display` | `splash_ms` | boot_splash (read by config_handler) |
-| `gauge_cfg` | slot blob | gauge_engine (read/write by config_handler) |
-| `logger` | `filenum` | data_logger (read by log_handler) |
+| `gauge_cfg` | slot blob, `alerts` | gauge_engine (read/write by config_handler) |
 
 ## Memory Budget
 

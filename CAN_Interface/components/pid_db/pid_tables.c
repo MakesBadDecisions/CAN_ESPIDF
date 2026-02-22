@@ -84,7 +84,7 @@ static const pid_entry_t s_obd2_pids[] = {
     { 0x2F, "Fuel tank level",                         PID_TYPE_FORMULA,  UNIT_PERCENT, PID_FORMULA_A_PERCENT_255,         P0,              1, 0x01 },
     { 0x30, "Warm-ups since codes cleared",            PID_TYPE_FORMULA,  UNIT_COUNT,   PID_FORMULA_RAW_BYTE,              P0,              1, 0x01 },
     { 0x31, "Distance since codes cleared",            PID_TYPE_FORMULA,  UNIT_KM,      PID_FORMULA_AB_RAW,                P0,              2, 0x01 },
-    { 0x32, "Evap vapor pressure",                     PID_TYPE_FORMULA,  UNIT_PA,      PID_FORMULA_AB_DIV_N,              P(0, 0, 4),      2, 0x01 },
+    { 0x32, "Evap vapor pressure",                     PID_TYPE_FORMULA,  UNIT_PA,      PID_FORMULA_AB_SIGNED_DIV_N,       P(0, 0, 4),      2, 0x01 },
     { 0x33, "Barometric pressure",                     PID_TYPE_FORMULA,  UNIT_KPA,     PID_FORMULA_RAW_BYTE,              P0,              1, 0x01 },
     { 0x34, "O2 Sensor 1 EQ / current",                PID_TYPE_FORMULA,  UNIT_RATIO,   PID_FORMULA_AB_RATIO_32768,        P0,              4, 0x01 },
     { 0x35, "O2 Sensor 2 EQ / current",                PID_TYPE_FORMULA,  UNIT_RATIO,   PID_FORMULA_AB_RATIO_32768,        P0,              4, 0x01 },

@@ -15,9 +15,14 @@ idf_component_register(
         lvgl
         comm_link
         gauge_engine
+        pid_store
         data_logger
         display_driver
         imu_display
+        wifi_manager
+        system
         nvs_flash
         log
+        tca9554
+        devices
 )

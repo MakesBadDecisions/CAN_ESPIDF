@@ -92,9 +92,9 @@ The primary user interaction flow:
 - [x] `sys_print_device_info()` -- chip, flash, PSRAM, MAC
 - [x] `sys_time_us()` / `sys_time_ms()` -- timing utilities
 - [x] `sys_get_free_heap()` -- heap monitoring
-- [ ] NVS config module -- load/save gauge layout, alert thresholds, WiFi credentials
+- [x] NVS config module -- load/save gauge layout, alert thresholds, WiFi credentials
 - [ ] NVS config module -- define default config values for first boot
-- [ ] Task watchdog registration for all tasks
+- [ ] Task watchdog registration for all tasks (implement when stability concern arises)
 - [ ] System health struct -- heap free, min heap, uptime, connection state
 
 ## comm_link/
@@ -121,6 +121,9 @@ The primary user interaction flow:
 - [x] Store vehicle info -- save VIN/ECU to NVS on successful scan (namespace "vehicle")
 - [x] Load vehicle info -- recall saved VIN/ECU from NVS on boot, show on display
 - [x] Callback registration -- notify UI when new PID data arrives (gauge_engine callback + LVGL timer)
+- [x] Remote system info API -- `comm_link_get_remote_heap_kb()`, `comm_link_get_remote_uptime_ms()`, `comm_link_get_remote_node_state()` from heartbeat
+- [x] DTC storage -- parse `MSG_DTC_LIST` into `comm_dtc_entry_t` cache with mutex
+- [x] DTC API -- `comm_link_request_dtcs()`, `comm_link_clear_dtcs()`, `comm_link_get_dtcs()`, `comm_link_get_dtc_count()`, `comm_link_has_dtc_data()`
 
 ## display_driver/
 
@@ -159,8 +162,8 @@ The primary user interaction flow:
 - [x] Fallback to header defaults when no NVS data
 - [x] CST820 I2C capacitive touch backend (Waveshare) -- polling task, LVGL indev, TCA9554 reset
 - [x] Multi-controller HAL -- compile-time #if TOUCH_TYPE_XPT2046 / TOUCH_TYPE_CST820
-- [ ] Touch filtering -- debounce or median filter for noisy readings
-- [ ] Long-press detection for calibration re-entry from running UI
+- [ ] Touch filtering -- debounce or median filter for noisy readings (low priority)
+- [ ] Long-press detection -- hidden menus, easter eggs, fun features (deferred)
 
 ## gauge_engine/
 
@@ -187,14 +190,16 @@ The primary user interaction flow:
 - [x] Virtual PID NVS persistence -- VPID_IMU stored/restored from NVS naturally, display mode preserved
 - [x] Virtual PID poll list -- virtual PIDs excluded from CAN poll list, rebuild_poll_list handles IMU-only case
 - [x] IMU uniqueness enforcement -- only one gauge slot can host IMU at a time (ui_events.c on_pid_changed)
-- [ ] Alert thresholds -- warning/critical limits per slot (WiFi Manager scope)
-- [ ] Gauge type renderers -- sweep dials, bar graphs, symbols, arc gauges (see Project Vision below)
+- [x] Alert thresholds -- warning/critical limits per slot (warn/crit/max per PID, NVS blob, evaluate_alert with bidirectional detection)
+- [x] Alert visual effects -- yellow→red gradient border (warn zone), flashing red border + red text (critical), theme color restore on clear
+- [ ] Gauge type renderers -- sweep dials, bar graphs, symbols, arc gauges (big project, later -- see Project Vision below)
 
 ## data_logger/
 
 - [x] SD card initialization -- SPI bus, FAT mount on shared SPI2_HOST with touch (DMA enabled)
 - [x] SD card initialization -- SDMMC 1-bit mount (Waveshare, TCA9554 D3 enable)
-- [x] Sequential file naming -- log1.csv, log2.csv... with NVS-persisted counter
+- [x] Timestamp file naming -- MMDDHHMM.csv using RTC + timezone, 8.3 FAT compatible (replaces sequential counter, no NVS tracking)
+- [x] ~~Sequential file naming -- log1.csv, log2.csv... with NVS-persisted counter~~ (replaced by timestamp naming)
 - [x] HP Tuners CSV header -- bracketed sections, channel info (PID numbers, names, units)
 - [x] Data row writing -- time offset + raw CAN values, empty fields for stale/missing
 - [x] Write buffering -- 4KB buffer, flushed on full or session stop
@@ -202,9 +207,8 @@ The primary user interaction flow:
 - [x] Row logging from PID callback -- logger_log_row() called on each new_data in gauge_update_cb
 - [x] Non-blocking mutex -- 5ms timeout, skip row rather than block LVGL
 - [x] Wired into main.c boot sequence (Phase 8, non-fatal on failure)
-- [ ] File rotation -- close and start new at configurable size limit
-- [ ] Storage monitoring -- track SD card free space, warn when low
-- [ ] File listing API -- enumerate log files for WiFi download
+- [x] Storage monitoring -- SD free space via FATFS f_getfree(), LOW! warning when < 50MB (status API, System Info panel, portal)
+- [x] File listing API -- enumerate log files for WiFi download (log_handler.c)
 
 ## wifi_manager/ -- Web Configuration Portal
 
@@ -213,63 +217,91 @@ It is the primary settings hub for the entire system (both Display and CAN Inter
 See `components/wifi_manager/README.md` for full architecture, API spec, and QR code design.
 
 ### Phase 1: WiFi AP + QR Code + System Status
-- [ ] Enable `LV_USE_QRCODE 1` in `lv_conf.h` (line 660)
-- [ ] WiFi AP init -- APSTA mode, SSID from MAC suffix (CAN_<4hex>), random 8-char password
-- [ ] Random password generator -- `esp_random()`, unambiguous charset (no 0/O/o, 1/l/I)
-- [ ] WiFi event handler -- track client connect/disconnect, update client count
-- [ ] QR screen (LVGL) -- WiFi QR code centered on screen, SSID and password as text below
-- [ ] QR stage 2 -- swap to URL QR (http://192.168.4.1/) when first client connects
-- [ ] QR screen close button -- stop AP, return to gauge UI
-- [ ] HTTP server start -- `httpd_start()`, register URI handlers
-- [ ] `GET /api/status` -- system info JSON (heap, uptime, link_state, sd_mounted)
-- [ ] `GET /` -- minimal embedded HTML dashboard
-- [ ] NVS settings -- load/save ssid, pass, channel, ap_on (namespace "wifi")
-- [ ] NVS password behavior -- empty = random each start, non-empty = persistent
+- [x] Enable `LV_USE_QRCODE 1` in `lv_conf.h`
+- [x] WiFi AP init -- APSTA mode, SSID from MAC suffix (CAN_<4hex>), random 8-char password
+- [x] Random password generator -- `esp_random()`, unambiguous charset (no 0/O/o, 1/l/I)
+- [x] WiFi event handler -- track client connect/disconnect, update client count
+- [x] QR screen (LVGL) -- WiFi QR code centered on screen, SSID and password as text below
+- [x] QR stage 2 -- swap to URL QR (http://192.168.4.1/) when first client connects
+- [x] QR screen close button -- stop AP, return to gauge UI
+- [x] HTTP server start -- `httpd_start()`, register URI handlers
+- [x] `GET /api/status` -- system info JSON (heap, uptime, link_state, sd_mounted)
+- [x] `GET /` -- embedded HTML single-page app (portal_handler.c)
+- [x] NVS settings -- load/save ssid, pass, channel, ap_on (namespace "wifi")
+- [x] NVS password behavior -- empty = random each start, non-empty = persistent
 
 ### Phase 2: Log File Browser + Download
-- [ ] `GET /api/logs` -- list CSV files on SD card (name, size, date)
-- [ ] `GET /api/logs/:filename` -- chunked file download (4KB chunks via httpd_resp_send_chunk)
-- [ ] `DELETE /api/logs/:filename` -- delete log file
-- [ ] `GET /api/sd` -- SD card status (total_bytes, free_bytes, mounted)
-- [ ] Log session control -- start/stop logging from web UI
+- [x] `GET /api/logs` -- list CSV files on SD card (name, size, date)
+- [x] `GET /api/logs/:filename` -- chunked file download (4KB chunks via httpd_resp_send_chunk)
+- [x] `DELETE /api/logs/:filename` -- delete log file
+- [x] `GET /api/sd` -- SD card status (total_bytes, free_bytes, mounted)
+- [x] ~~Log session control~~ -- not needed; logging auto-starts/stops with polling
 
 ### Phase 3: Display Configuration API
-- [ ] `GET /api/gauges` -- read all 20 gauge slots (pid_id, units, value)
-- [ ] `POST /api/gauges/:slot` -- set PID and unit for a slot
-- [ ] `DELETE /api/gauges/:slot` -- clear a slot
-- [ ] `GET /api/gauges/pids` -- PID dropdown options from gauge_engine
-- [ ] `GET /api/gauges/:slot/units` -- unit dropdown options per slot
-- [ ] `GET/POST /api/config/splash` -- splash duration read/write (boot_splash API)
-- [ ] `GET/POST /api/config/backlight` -- backlight brightness (needs display_driver API)
-- [ ] Alert thresholds -- warning/critical limits per gauge slot
+- [x] `GET /api/gauges` -- read all 20 gauge slots (pid_id, units, value)
+- [x] `POST /api/gauges` -- set PID and unit for a slot
+- [x] `DELETE /api/gauges` -- clear a slot
+- [x] `GET /api/gauges/pids` -- PID dropdown options from gauge_engine
+- [x] `GET /api/gauges/units` -- unit dropdown options per slot
+- [x] `GET/POST /api/config/splash` -- splash duration read/write (boot_splash API)
+- [x] `GET/POST /api/config/backlight` -- backlight brightness (display_driver API)
+- [x] `GET/POST /api/config/wifi` -- WiFi AP SSID, password, channel settings
+- [x] `GET/POST /api/config/autopoll` -- auto-poll on reconnect toggle
+- [x] Alert thresholds -- warning/critical limits per gauge slot (POST /api/pids/alerts endpoint, PID table columns for warn/crit/max, saveAlerts() JS)
 - [ ] Touch calibration -- trigger recalibration from web UI
 
-### Phase 4: HTML Frontend (Embedded)
-- [ ] Dashboard page -- system status, link state, SD usage, uptime
-- [ ] Logs page -- file list table, download/delete buttons
-- [ ] Gauges page -- slot grid, PID dropdown, unit dropdown per slot
-- [ ] Settings page -- splash duration, backlight, WiFi SSID/pass
-- [ ] Embed as C byte arrays -- `target_add_binary_data()` or const char[] in source
-- [ ] Mobile-friendly layout -- responsive design for phone screens
+### Phase 4: HTML Frontend (Embedded SPA)
+- [x] Status page -- system status, link state, SD usage, uptime, time sync
+- [x] Logs page -- file list table, download/delete buttons
+- [x] PIDs page -- PID browser with poll toggle per PID
+- [x] Workshop page -- gauge slot grid, PID dropdown, unit dropdown per slot
+- [x] Settings page -- splash duration, backlight slider, WiFi SSID/pass, auto-poll toggle
+- [x] Embed as const char[] -- PORTAL_HTML in portal_handler.c (no SPIFFS needed)
+- [x] Mobile-friendly layout -- responsive CSS, tabs, cards, toast notifications
+- [x] Auto time sync -- JS grabs client epoch + timezone on page load, POSTs to /api/settime
 
 ### Phase 5: CAN Interface Proxy (over UART)
-- [ ] `GET /api/can/status` -- CAN bus status from heartbeat data
-- [ ] `POST /api/can/scan` -- trigger vehicle scan via comm_link
-- [ ] `GET /api/can/vehicle` -- VIN, protocol, supported PIDs
-- [ ] `POST /api/can/poll` -- set poll list (PIDs, rate)
-- [ ] `DELETE /api/can/poll` -- clear poll list
-- [ ] Scan control -- trigger vehicle scan from web UI
+- [x] `GET /api/pids` -- PID list with names, units, supported status from CAN Interface
+- [x] `GET /api/pids/poll` -- current poll list state
+- [x] `POST /api/pids/poll` -- set poll list (PIDs, rate) via comm_link
+- [x] `POST /api/can/scan` -- trigger vehicle scan via comm_link (scan_handler.c)
+- [x] `GET /api/can/vehicle` -- VIN, protocol, ECU count, PID count, DTC count, scan status, ECU name, CalID, CVN
+- [x] Scan button on web portal -- Vehicle card with Scan Vehicle button on Status page
+- [x] Display scan button renamed "Connect" → "Scan" (existing Screen1 button, no layout change)
 
-### Phase 6+ (Future / Deferred)
-- [ ] DTC viewer / clear -- CMD_READ_DTCS/CMD_CLEAR_DTCS via comm_protocol
-- [ ] Custom PID editor -- user-defined address, mode, name, formula
-- [ ] Custom math channels -- virtual PIDs derived from real PIDs
+### Phase 6: Vehicle Tab + DTC
+- [x] Vehicle tab in portal -- dedicated page with VIN, ECU count, protocol info, ECU name, CalID, CVN, scan button
+- [x] DTC storage on Display comm_link -- `comm_dtc_list_t` parsed from Interface, cached with mutex
+- [x] DTC HTTP API -- `GET /api/can/dtcs`, `POST /api/can/dtcs/read`, `POST /api/can/dtcs/clear`
+- [x] DTC viewer on Vehicle tab -- table with code, system, type; Read/Clear buttons
+- [x] DTC comm_link API -- `comm_link_request_dtcs()`, `comm_link_clear_dtcs()`, `comm_link_get_dtcs()`
+- [x] CAN_Interface CMD_READ_DTCS handler -- routes to diagnostics_read_dtcs via scan_task
+- [x] CAN_Interface CMD_CLEAR_DTCS handler -- routes to diagnostics_clear_dtcs via scan_task
+- [x] Fix wire format -- comm_link_send_dtcs uses `comm_dtc_list_t` with `comm_dtc_entry_t` entries (was ad-hoc)
+- [x] DTC type bitmask -- type field is OR'd bitmask (stored|pending|permanent), scan_handler renders combined strings
+- [x] MIL status on Vehicle tab -- 3-state indicator (green OFF, yellow OFF with emission DTCs, red ON)
+- [x] Mode 03 + 07 + 0A combined query -- stored, pending, permanent DTCs with dedup-merge
+- [x] PID 0x01 monitor status -- MIL lamp + emission DTC count decoded during scan, sent in vehicle info
+- [ ] Tests and bi-directional controls -- future scope on Vehicle tab
+
+### Phase 7: IMU Setup Tab
+- [ ] IMU Setup tab in portal -- dedicated configuration and calibration UI
+- [ ] Configurable G range -- adjustable ±G mapping via IMU Setup tab
+- [ ] Direction-of-travel calibration -- drive straight for ~5s, IMU determines forward vector (yaw offset)
+- [ ] IMU recalibration trigger -- recalibrate gyro bias from web UI
+
+### Phase 8+ (Future / Deferred)
+- [ ] Custom PID editor -- user-defined address, mode, name, formula (big project, later)
+- [ ] Custom math channels -- virtual PIDs derived from real PIDs (big project, later)
 - [ ] Freeze frame viewer -- snapshot data for stored DTCs
 - [ ] CAN bitrate change -- new CONFIG_CMD + CAN Interface handler
-- [ ] Vehicle profiles -- per-VIN gauge configs, auto-detect by VIN
+- [ ] Vehicle profiles -- per-VIN gauge configs with standard defaults, auto-detect by VIN (later)
 - [x] Display themes -- basic theme coloring via colorwheel (text + border colors, NVS-persisted). Full LVGL style system is future scope.
+- [x] Time sync -- POST /api/settime + GET /api/time endpoints (time_handler.c), JS auto-sync on portal load
+- [x] PCF85063 RTC -- I2C driver, UTC storage, NVS timezone offset, boot-time system clock restore
 - [ ] WebSocket live data -- real-time push alternative to polling
-- [ ] Hardware addon config -- IMU cal, sensor offsets, buzzer/LED
+- [ ] OTA update via AP -- display updates through WiFi AP, CAN Interface updates via UART command from display (map full workflow before implementation)
+- [x] Buzzer integration -- TCA9554 EXIO8, triggers on ALERT_MAX level, silences when value drops below MAX
 
 ## devices/
 
@@ -313,7 +345,27 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [x] Axis mapping -- X=forward, Y=right, Z=up in calibrated reference frame
 - [x] IMU data integration into data logger -- Lateral G + Longitudinal G columns appended to CSV
 - [x] IMU data as virtual PID channels in gauge_engine -- VPID_IMU, gauge_engine_update reads qmi8658
-- [ ] Orientation detection -- portrait/landscape auto-rotate (if useful for round display)
+- [ ] Orientation detection -- portrait/landscape auto-rotate (low priority, round display)
+
+## pcf85063/ -- Real-Time Clock
+
+- [x] PCF85063A I2C driver -- init, set_time, get_time, set_epoch, get_epoch
+- [x] BCD encode/decode helpers for 7-register burst read/write
+- [x] UTC storage design -- RTC stores UTC, timezone offset in NVS
+- [x] `pcf85063_sync_to_system()` -- read RTC → `settimeofday()` on boot
+- [x] `pcf85063_set_epoch()` -- set system clock + write RTC in one call
+- [x] NVS timezone persistence -- namespace \"rtc\" key \"tz_off\" (minutes from UTC)
+- [x] HAS_RTC guard -- stub implementations for boards without RTC
+- [x] Boot integration -- Phase 0.7 in main.c (after IMU, before display)
+- [x] HTTP time sync -- POST /api/settime + GET /api/time in time_handler.c
+- [x] JS auto-sync -- portal grabs client epoch + timezone offset on page load
+- [ ] Battery backup -- coin cell holds time across power cycles (hardware ordered)
+
+## System Info Panel (Screen2)
+
+- [x] System panel populated -- Display heap/min/uptime, SD/logger status, CAN Interface remote stats, UART stats
+- [x] 1-second LVGL timer refresh
+- [x] Remote CAN Interface data from heartbeat (heap, uptime, node state)
 
 ## imu_display/ -- IMU Visualization
 
@@ -327,7 +379,8 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [x] Refactor to render inside gauge slot -- attach/detach API, inner container for dropdown avoidance
 - [x] Tilt mode option -- unit dropdown toggles G-load vs tilt via imu_display_set_mode()
 - [x] Dual mode rendering -- G-Load (±1.5G accel) and Tilt (±30° pitch/roll) in timer callback
-- [ ] Configurable G range -- adjustable ±1.5G mapping via settings (WiFi Manager scope)
+- [ ] Configurable G range -- adjustable ±G mapping via IMU Setup tab (see wifi_manager Phase 7)
+- [ ] Direction-of-travel calibration -- forward vector determination from sustained straight-line driving
 
 ## data_logger/ -- IMU Integration
 
@@ -348,7 +401,7 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [x] `main.c` -- error handling for init failures (continue with degraded functionality)
 - [x] `main.c` -- gauge_engine_init() wired as Phase 7 after comm_link_start()
 - [x] `CMakeLists.txt` -- register all components
-- [ ] `partitions.csv` -- verify partition table for OTA support
+- [ ] `partitions.csv` -- configure for OTA support (needed when OTA is implemented)
 
 ## Integration and Testing
 
@@ -360,10 +413,10 @@ See `components/wifi_manager/README.md` for full architecture, API spec, and QR 
 - [ ] REST API test -- verify all endpoints return correct JSON for config read/write
 - [ ] Custom PID test -- create custom PID via web UI, verify polling and logging
 - [ ] Math channel test -- create virtual channel, verify formula output in gauges and log
-- [ ] Alert test -- inject out-of-range values, verify warning and critical alert behavior
+- [x] Alert test -- verified on hardware: gradient warn border, flashing red critical border + red text, theme restore on clear
 - [ ] Sensor test -- connect BME280, verify readings appear in data store and CSV
 - [ ] Buzzer test -- trigger alert condition, verify tone output
-- [x] Stress test -- sustained 10Hz PID updates across 30+ PIDs, verify no dropped data
+- [x] Stress test -- sustained polling across 20 PIDs in round-robin, ~1.1 Hz per PID, verified zero dropped data, zero failures
 - [x] Endurance test -- 10-hour overnight run: active CAN polling, UART streaming, LVGL rendering, SD logging. Zero heap delta, zero crashes, UI responsive throughout. (Feb 21, 2026)
 - [x] Cross-node integration -- connect to CAN Interface Node via USB-C, live vehicle data
 

@@ -6,7 +6,7 @@
  *   - SPI mode (CrowPanel 4.3"): shared SPI2 bus with touch controller
  *   - SDMMC 1-bit mode (Waveshare 2.1"): dedicated SDMMC peripheral
  *
- * Creates sequential log files (log1.csv, log2.csv, ...) with structured
+ * Creates timestamp-named log files (MMDDYYYY_HHMM.csv) with structured
  * headers and PID data rows in HP Tuners Scanner compatible format.
  */
 
@@ -14,6 +14,7 @@
 #include "comm_link.h"
 #include "system.h"
 #include "device.h"
+#include "pcf85063.h"
 
 #if defined(HAS_IMU) && HAS_IMU
 #include "qmi8658.h"
@@ -22,8 +23,6 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
-#include "nvs.h"
 
 #if defined(SD_USE_SDMMC) && SD_USE_SDMMC
     #include "driver/sdmmc_host.h"
@@ -43,6 +42,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <time.h>
+#include "ff.h"
 
 static const char *TAG = "logger";
 
@@ -58,7 +59,7 @@ typedef struct {
     // Session
     logger_state_t  state;
     FILE           *file;
-    uint32_t        file_number;        // Current file number (persisted in NVS)
+    char            file_name[32];      // Current file name (e.g. "02211926.csv")
     uint32_t        rows_written;
     uint32_t        bytes_written;
     uint32_t        start_tick;         // Session start tick (for offset calc)
@@ -77,28 +78,16 @@ typedef struct {
 static logger_ctx_t s_ctx = {0};
 
 // ============================================================================
-// NVS Helpers — persist file sequence number
+// Local Time Helper — builds timestamp from system clock + NVS timezone
 // ============================================================================
 
-static uint32_t nvs_load_file_number(void)
+static void get_local_time(struct tm *out)
 {
-    nvs_handle_t h;
-    uint32_t num = 0;
-    if (nvs_open("logger", NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u32(h, "filenum", &num);
-        nvs_close(h);
-    }
-    return num;
-}
-
-static void nvs_save_file_number(uint32_t num)
-{
-    nvs_handle_t h;
-    if (nvs_open("logger", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u32(h, "filenum", num);
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    time_t now;
+    time(&now);
+    int16_t tz_min = pcf85063_get_tz_offset();
+    time_t local = now + (tz_min * 60);
+    gmtime_r(&local, out);
 }
 
 // ============================================================================
@@ -221,12 +210,8 @@ esp_err_t logger_init(void)
         ESP_LOGI(TAG, "Created %s", LOGGER_LOG_DIR);
     }
 
-    // Load file sequence number from NVS
-    s_ctx.file_number = nvs_load_file_number();
-
     s_ctx.state = LOGGER_STATE_READY;
-    ESP_LOGI(TAG, "SD card mounted, next file: log%lu.csv",
-             (unsigned long)(s_ctx.file_number + 1));
+    ESP_LOGI(TAG, "SD card mounted, ready for logging");
     return ESP_OK;
 }
 
@@ -245,12 +230,12 @@ static void write_header(const char *vin)
 
     // Log Information
     buf_puts("[Log Information]\r\n");
-    // Use elapsed seconds since boot for creation time
-    uint32_t secs = sys_time_ms() / 1000;
-    uint32_t mins = secs / 60; secs %= 60;
-    uint32_t hrs  = mins / 60; mins %= 60;
-    snprintf(line, sizeof(line), "Creation Time: %lu:%02lu:%02lu\r\n",
-             (unsigned long)hrs, (unsigned long)mins, (unsigned long)secs);
+    // Use local time from RTC + timezone for creation time
+    struct tm local;
+    get_local_time(&local);
+    snprintf(line, sizeof(line), "Creation Time: %02d/%02d/%04d %02d:%02d:%02d\r\n",
+             local.tm_mon + 1, local.tm_mday, local.tm_year + 1900,
+             local.tm_hour, local.tm_min, local.tm_sec);
     buf_puts(line);
     buf_puts("Notes: \r\n");
     buf_puts("\r\n");
@@ -350,14 +335,20 @@ esp_err_t logger_start(const uint16_t *pids, uint8_t pid_count, const char *vin)
     s_ctx.log_imu = false;
 #endif
 
-    // Increment file number and persist
-    s_ctx.file_number++;
-    nvs_save_file_number(s_ctx.file_number);
+    // Generate timestamp filename: MMDDHHMM.csv (8.3 FAT compatible)
+    struct tm local;
+    get_local_time(&local);
+    char name_buf[64];
+    snprintf(name_buf, sizeof(name_buf),
+             "%02d%02d%02d%02d.csv",
+             local.tm_mon + 1, local.tm_mday,
+             local.tm_hour, local.tm_min);
+    strncpy(s_ctx.file_name, name_buf, sizeof(s_ctx.file_name) - 1);
+    s_ctx.file_name[sizeof(s_ctx.file_name) - 1] = '\0';
 
     // Open file
     char path[64];
-    snprintf(path, sizeof(path), "%s/log%lu.csv",
-             LOGGER_LOG_DIR, (unsigned long)s_ctx.file_number);
+    snprintf(path, sizeof(path), "%s/%s", LOGGER_LOG_DIR, s_ctx.file_name);
 
     s_ctx.file = fopen(path, "w");
     if (!s_ctx.file) {
@@ -473,16 +464,28 @@ logger_status_t logger_get_status(void)
         .state = s_ctx.state,
         .rows_written = s_ctx.rows_written,
         .bytes_written = s_ctx.bytes_written,
-        .file_number = s_ctx.file_number,
         .sd_total_bytes = 0,
         .sd_free_bytes = 0,
+        .sd_low_space = false,
     };
 
+    // Copy current file name
+    strncpy(st.file_name, s_ctx.file_name, sizeof(st.file_name) - 1);
+    st.file_name[sizeof(st.file_name) - 1] = '\0';
+
     if (s_ctx.sd_mounted && s_ctx.card) {
-        // Approximate from card info
+        // Total from card info
         uint64_t total = (uint64_t)s_ctx.card->csd.capacity * s_ctx.card->csd.sector_size;
         st.sd_total_bytes = total;
-        // Free space requires FATFS query — skip for now, expensive
+
+        // Free space from FATFS
+        FATFS *fs;
+        DWORD free_clust;
+        if (f_getfree("0:", &free_clust, &fs) == FR_OK) {
+            st.sd_free_bytes = (uint64_t)free_clust * fs->csize * s_ctx.card->csd.sector_size;
+            uint64_t low_threshold = (uint64_t)LOGGER_LOW_SPACE_MB * 1024 * 1024;
+            st.sd_low_space = (st.sd_free_bytes < low_threshold);
+        }
     }
 
     return st;

@@ -6,6 +6,7 @@ idf_component_register(
         display_driver
         touch_driver
         gauge_engine
+        pid_store
         data_logger
         boot_splash
         wifi_manager
@@ -16,4 +17,5 @@ idf_component_register(
         i2c_bus
         tca9554
         qmi8658
+        pcf85063
 )

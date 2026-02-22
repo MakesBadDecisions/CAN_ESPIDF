@@ -46,6 +46,7 @@ This component does NOT know about specific PIDs or their meanings - it deals on
 | 0x04 | Clear DTCs | `[01][04]` | `[01][44]` |
 | 0x07 | Pending DTCs | `[01][07]` | `[N*2+1][47][DTC_H][DTC_L]...` |
 | 0x09 | Vehicle Info | `[02][09][InfoType]` | ISO-TP multi-frame |
+| 0x0A | Permanent DTCs | `[01][0A]` | `[N*2+1][4A][DTC_H][DTC_L]...` |
 | 0x19 | UDS Read DTC | `[03][19][SubFunc][Mask]` | ISO-TP multi-frame |
 | 0x22 | Read Data By ID | `[03][22][DID_H][DID_L]` | `[03+][62][DID_H][DID_L][data...]` |
 

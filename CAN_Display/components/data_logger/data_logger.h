@@ -7,7 +7,7 @@
  *   - Channel info: PID numbers, names, units
  *   - Channel data: time offset + values per poll cycle
  *
- * Files are named sequentially: log1.csv, log2.csv, ...
+ * Files are named by local timestamp: MMDDHHMM.csv (8.3 FAT compatible)
  * SD card shares SPI2 bus with touch controller (different CS pins).
  */
 
@@ -21,10 +21,11 @@
 // Configuration
 // ============================================================================
 
-#define LOGGER_MAX_CHANNELS     20      // Max PIDs to log simultaneously
+#define LOGGER_MAX_CHANNELS     96      // Max PIDs to log simultaneously
 #define LOGGER_WRITE_BUF_SIZE   4096    // Write buffer before flush
 #define LOGGER_MOUNT_POINT      "/sdcard"
 #define LOGGER_LOG_DIR          "/sdcard/logs"
+#define LOGGER_LOW_SPACE_MB     50      // Warn when less than 50MB free
 
 // ============================================================================
 // Logger State
@@ -41,9 +42,10 @@ typedef struct {
     logger_state_t  state;
     uint32_t        rows_written;       // Data rows in current session
     uint32_t        bytes_written;      // Bytes written in current session
-    uint32_t        file_number;        // Current log file number
+    char            file_name[32];      // Current/last log file name (e.g. "02211926.csv")
     uint64_t        sd_total_bytes;     // SD card total capacity
     uint64_t        sd_free_bytes;      // SD card free space
+    bool            sd_low_space;       // true when free < LOGGER_LOW_SPACE_MB
 } logger_status_t;
 
 // ============================================================================

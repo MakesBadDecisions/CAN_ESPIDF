@@ -73,7 +73,8 @@ static esp_err_t build_request_frame(const obd2_request_t *request,
         frame->dlc = 8;
     } else if (request->mode == OBD2_MODE_READ_DTC || 
                request->mode == OBD2_MODE_CLEAR_DTC ||
-               request->mode == OBD2_MODE_PENDING_DTC) {
+               request->mode == OBD2_MODE_PENDING_DTC ||
+               request->mode == OBD2_MODE_PERMANENT_DTC) {
         // No PID for DTC modes
         frame->data[0] = 0x01;  // 1 byte payload
         frame->data[1] = request->mode;
@@ -161,8 +162,9 @@ static void parse_single_frame(const uint8_t *data, uint8_t len,
             memcpy(resp->data, &data[4], resp->data_len);
         }
     } else if (mode == (OBD2_MODE_READ_DTC + OBD2_RESPONSE_OFFSET) ||
-               mode == (OBD2_MODE_PENDING_DTC + OBD2_RESPONSE_OFFSET)) {
-        // Mode 0x43/0x47: DTCs, no PID
+               mode == (OBD2_MODE_PENDING_DTC + OBD2_RESPONSE_OFFSET) ||
+               mode == (OBD2_MODE_PERMANENT_DTC + OBD2_RESPONSE_OFFSET)) {
+        // Mode 0x43/0x47/0x4A: DTCs, no PID
         resp->pid = 0;
         resp->data_len = payload_len - 1;
         memcpy(resp->data, &data[2], resp->data_len);
@@ -247,6 +249,13 @@ static void parse_consecutive_frame(const uint8_t *data, uint8_t len)
                 resp->pid = (buf[1] << 8) | buf[2];
                 resp->data_len = s_obd2.isotp.total_len - 3;
                 memcpy(resp->data, &buf[3], resp->data_len);
+            } else if (resp->mode == (OBD2_MODE_READ_DTC + OBD2_RESPONSE_OFFSET) ||
+                       resp->mode == (OBD2_MODE_PENDING_DTC + OBD2_RESPONSE_OFFSET) ||
+                       resp->mode == (OBD2_MODE_PERMANENT_DTC + OBD2_RESPONSE_OFFSET)) {
+                // Mode 0x43/0x47/0x4A: DTCs — data starts right after mode byte
+                resp->pid = 0;
+                resp->data_len = s_obd2.isotp.total_len - 1;
+                memcpy(resp->data, &buf[1], resp->data_len);
             } else if (resp->mode == (OBD2_MODE_VEHICLE_INFO + OBD2_RESPONSE_OFFSET)) {
                 // Mode 0x49: VIN, ECU name, etc.
                 resp->pid = buf[1];
@@ -542,7 +551,122 @@ esp_err_t obd2_read_vin(char *vin_out, size_t buf_len)
     return ESP_OK;
 }
 
-esp_err_t obd2_read_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count)
+esp_err_t obd2_read_ecu_name(char *name_out, size_t buf_len)
+{
+    if (!name_out || buf_len < 21) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    obd2_response_t resp;
+    esp_err_t err = obd2_request_pid(OBD2_MODE_VEHICLE_INFO, 0x0A, &resp);
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    if (resp.status != OBD2_STATUS_OK) {
+        return ESP_FAIL;
+    }
+    
+    // Mode 09 PID 0x0A response: byte 0 = message count, bytes 1-20 = ECU name
+    // ASCII-coded, right-padded with null chars
+    if (resp.data_len >= 21) {
+        memcpy(name_out, &resp.data[1], 20);
+        name_out[20] = '\0';
+    } else if (resp.data_len >= 20) {
+        memcpy(name_out, resp.data, 20);
+        name_out[20] = '\0';
+    } else {
+        return ESP_FAIL;
+    }
+    
+    // Trim trailing nulls/spaces for cleaner display
+    for (int i = 19; i >= 0; i--) {
+        if (name_out[i] == '\0' || name_out[i] == ' ') {
+            name_out[i] = '\0';
+        } else {
+            break;
+        }
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t obd2_read_cal_id(char *cal_id_out, size_t buf_len)
+{
+    if (!cal_id_out || buf_len < 17) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    obd2_response_t resp;
+    esp_err_t err = obd2_request_pid(OBD2_MODE_VEHICLE_INFO, 0x04, &resp);
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    if (resp.status != OBD2_STATUS_OK) {
+        return ESP_FAIL;
+    }
+    
+    // Mode 09 PID 0x04 response: byte 0 = CalID count, then N×16 bytes
+    // Take just the first CalID (bytes 1-16)
+    if (resp.data_len >= 17) {
+        memcpy(cal_id_out, &resp.data[1], 16);
+        cal_id_out[16] = '\0';
+    } else if (resp.data_len >= 16) {
+        memcpy(cal_id_out, resp.data, 16);
+        cal_id_out[16] = '\0';
+    } else {
+        return ESP_FAIL;
+    }
+    
+    // Trim trailing nulls/spaces
+    for (int i = 15; i >= 0; i--) {
+        if (cal_id_out[i] == '\0' || cal_id_out[i] == ' ') {
+            cal_id_out[i] = '\0';
+        } else {
+            break;
+        }
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t obd2_read_cvn(char *cvn_out, size_t buf_len)
+{
+    if (!cvn_out || buf_len < 9) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    obd2_response_t resp;
+    esp_err_t err = obd2_request_pid(OBD2_MODE_VEHICLE_INFO, 0x06, &resp);
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    if (resp.status != OBD2_STATUS_OK) {
+        return ESP_FAIL;
+    }
+    
+    // Mode 09 PID 0x06 response: byte 0 = CVN count, then N×4 bytes raw
+    // Display first CVN as 8-char hex string
+    if (resp.data_len >= 5) {
+        snprintf(cvn_out, buf_len, "%02X%02X%02X%02X",
+                 resp.data[1], resp.data[2], resp.data[3], resp.data[4]);
+    } else if (resp.data_len >= 4) {
+        snprintf(cvn_out, buf_len, "%02X%02X%02X%02X",
+                 resp.data[0], resp.data[1], resp.data[2], resp.data[3]);
+    } else {
+        return ESP_FAIL;
+    }
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief Internal helper: read DTCs using specified OBD2 mode
+ */
+static esp_err_t read_dtcs_by_mode(uint8_t mode, uint16_t *dtc_array,
+                                   size_t max_dtcs, size_t *dtc_count)
 {
     if (!dtc_array || !dtc_count) {
         return ESP_ERR_INVALID_ARG;
@@ -552,7 +676,7 @@ esp_err_t obd2_read_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count
     
     obd2_response_t resp;
     obd2_request_t req = {
-        .mode = OBD2_MODE_READ_DTC,
+        .mode = mode,
         .pid = 0,
         .tx_id = OBD2_CAN_BROADCAST_ID,
         .timeout_ms = 0
@@ -575,11 +699,61 @@ esp_err_t obd2_read_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count
     size_t num_dtcs = resp.data[0];
     size_t data_idx = 1;
     
-    for (size_t i = 0; i < num_dtcs && i < max_dtcs && data_idx + 1 < resp.data_len; i++) {
-        dtc_array[i] = (resp.data[data_idx] << 8) | resp.data[data_idx + 1];
+    SYS_LOGI(TAG, "Mode 0x%02X: count_byte=%zu, data_len=%u",
+             mode, num_dtcs, resp.data_len);
+    
+    for (size_t i = 0; i < num_dtcs && *dtc_count < max_dtcs && data_idx + 1 < resp.data_len; i++) {
+        uint16_t dtc = (resp.data[data_idx] << 8) | resp.data[data_idx + 1];
         data_idx += 2;
-        (*dtc_count)++;
+        if (dtc != 0x0000) {   // Skip zero-padding
+            dtc_array[*dtc_count] = dtc;
+            (*dtc_count)++;
+        }
     }
+    
+    return ESP_OK;
+}
+
+esp_err_t obd2_read_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count)
+{
+    return read_dtcs_by_mode(OBD2_MODE_READ_DTC, dtc_array, max_dtcs, dtc_count);
+}
+
+esp_err_t obd2_read_pending_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count)
+{
+    return read_dtcs_by_mode(OBD2_MODE_PENDING_DTC, dtc_array, max_dtcs, dtc_count);
+}
+
+esp_err_t obd2_read_permanent_dtcs(uint16_t *dtc_array, size_t max_dtcs, size_t *dtc_count)
+{
+    return read_dtcs_by_mode(OBD2_MODE_PERMANENT_DTC, dtc_array, max_dtcs, dtc_count);
+}
+
+esp_err_t obd2_read_monitor_status(bool *mil_on, uint8_t *dtc_count)
+{
+    if (!mil_on || !dtc_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *mil_on = false;
+    *dtc_count = 0;
+    
+    obd2_response_t resp;
+    esp_err_t err = obd2_request_pid(OBD2_MODE_CURRENT_DATA, 0x01, &resp);
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    if (resp.status != OBD2_STATUS_OK || resp.data_len < 4) {
+        return ESP_FAIL;
+    }
+    
+    // Byte A: bit 7 = MIL, bits 6-0 = DTC count
+    *mil_on = (resp.data[0] & 0x80) != 0;
+    *dtc_count = resp.data[0] & 0x7F;
+    
+    SYS_LOGI(TAG, "Monitor status: MIL=%s, DTC count=%u",
+             *mil_on ? "ON" : "OFF", *dtc_count);
     
     return ESP_OK;
 }

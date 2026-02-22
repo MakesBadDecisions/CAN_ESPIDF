@@ -492,21 +492,26 @@ esp_err_t comm_link_send_heartbeat(void)
     return send_frame(MSG_HEARTBEAT, &hb, sizeof(hb));
 }
 
-esp_err_t comm_link_send_dtcs(const uint16_t *dtcs, uint8_t count)
+esp_err_t comm_link_send_dtcs(const uint16_t *dtcs, const uint8_t *types, uint8_t count)
 {
-    if (count == 0) {
-        // Send empty DTC list
-        uint8_t zero = 0;
-        return send_frame(MSG_DTC_LIST, &zero, 1);
+    comm_dtc_list_t list;
+    memset(&list, 0, sizeof(list));
+    
+    uint8_t send_count = (count > MAX_DTCS) ? MAX_DTCS : count;
+    list.dtc_count = send_count;
+    
+    for (uint8_t i = 0; i < send_count; i++) {
+        list.dtcs[i].code = dtcs[i];
+        list.dtcs[i].type = (types != NULL) ? types[i] : 0;
+        
+        // Derive system from high 2 bits of raw DTC code:
+        // 00xx = Powertrain(P), 01xx = Chassis(C), 10xx = Body(B), 11xx = Network(U)
+        list.dtcs[i].system = (uint8_t)((dtcs[i] >> 14) & 0x03);
     }
     
-    // Payload: 1 byte count + N * 2 bytes
-    uint16_t payload_len = 1 + count * sizeof(uint16_t);
-    uint8_t payload[COMM_MAX_PAYLOAD];
-    payload[0] = count;
-    memcpy(&payload[1], dtcs, count * sizeof(uint16_t));
-    
-    return send_frame(MSG_DTC_LIST, payload, payload_len);
+    // Send only the header + actual entries (not the full MAX_DTCS array)
+    uint16_t payload_len = 4 + send_count * sizeof(comm_dtc_entry_t);
+    return send_frame(MSG_DTC_LIST, &list, payload_len);
 }
 
 esp_err_t comm_link_send_vin(const char *vin)

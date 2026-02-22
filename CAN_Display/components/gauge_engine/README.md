@@ -67,6 +67,11 @@ typedef struct {
 | `gauge_engine_update()` | Read latest values, convert, format strings |
 | `gauge_engine_rebuild_poll_list()` | Re-aggregate after PID assignment change |
 | `gauge_engine_get_active_pid_count()` | Count unique PIDs in poll list |
+| `gauge_engine_set_alert(pid_id, warn, crit, max)` | Set warn/crit/max thresholds for a PID |
+| `gauge_engine_get_alert(pid_id, warn*, crit*, max*)` | Read thresholds for a PID (returns true if found) |
+| `gauge_engine_clear_alert(pid_id)` | Remove alert config for a PID |
+| `gauge_engine_save_alerts()` | Persist all alert configs to NVS blob |
+| `gauge_engine_load_alerts()` | Load alert configs from NVS (called automatically in init) |
 
 ## Thread Safety
 
@@ -95,6 +100,6 @@ gauge_engine/
 
 ## Future
 
-- [ ] Alert thresholds -- warning/critical limits with color changes
+- [x] Alert thresholds -- warn/crit/max per PID, bidirectional detection, NVS blob persistence, visual effects in ui_events.c
 - [ ] Value smoothing -- low-pass filter for jittery readings
 - [ ] Gauge type rendering -- sweep dials, bar graphs (currently numeric only)

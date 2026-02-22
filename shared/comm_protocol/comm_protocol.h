@@ -122,6 +122,9 @@ typedef struct __attribute__((packed)) {
 
 #define VIN_LENGTH          17
 #define MAX_SUPPORTED_PIDS  96      // Mode 01 PIDs 0x00-0x60
+#define ECU_NAME_LENGTH     20      // Mode 09 PID 0x0A
+#define CAL_ID_LENGTH       16      // Mode 09 PID 0x04
+#define CVN_HEX_LENGTH      8       // Mode 09 PID 0x06 (4 bytes as hex)
 
 typedef struct __attribute__((packed)) {
     char     vin[VIN_LENGTH + 1];   // VIN string (null-terminated)
@@ -129,6 +132,11 @@ typedef struct __attribute__((packed)) {
     uint8_t  ecu_count;             // Number of ECUs
     uint8_t  supported_pids[MAX_SUPPORTED_PIDS / 8];  // Bitmap (12 bytes)
     uint16_t dtc_count;             // Number of stored DTCs
+    uint8_t  mil_status;            // 0=off, 1=on (check engine light)
+    uint8_t  emission_dtc_count;    // DTCs flagged by ECU (from PID 0x01)
+    char     ecu_name[ECU_NAME_LENGTH + 1];  // ECU name (null-terminated)
+    char     cal_id[CAL_ID_LENGTH + 1];      // Calibration ID (null-terminated)
+    char     cvn[CVN_HEX_LENGTH + 1];        // CVN hex string (null-terminated)
 } comm_vehicle_info_t;
 
 // ============================================================================
@@ -147,9 +155,14 @@ typedef struct __attribute__((packed)) {
 // DTC Entry
 // ============================================================================
 
+// DTC type bitmask — a single DTC may be stored AND pending AND permanent
+#define DTC_TYPE_STORED     0x01
+#define DTC_TYPE_PENDING    0x02
+#define DTC_TYPE_PERMANENT  0x04
+
 typedef struct __attribute__((packed)) {
     uint16_t code;          // DTC code (P0XXX, etc.)
-    uint8_t  type;          // 0=stored, 1=pending, 2=permanent
+    uint8_t  type;          // Bitmask: DTC_TYPE_STORED | PENDING | PERMANENT
     uint8_t  system;        // 0=powertrain, 1=chassis, 2=body, 3=network
 } comm_dtc_entry_t;
 

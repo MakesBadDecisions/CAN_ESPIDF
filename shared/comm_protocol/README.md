@@ -143,21 +143,28 @@ The `count` field tells the receiver how many entries follow.
 
 ### VEHICLE_INFO (0x03)
 
-Static vehicle information retrieved from the ECU (VIN, calibration IDs,
-etc.).
+Static vehicle information retrieved from the ECU during scan. Sent as a
+single packed struct after ECU discovery, VIN read, Mode 09 info retrieval,
+and supported PID scan.
 
 ```c
 typedef struct __attribute__((packed)) {
-    uint8_t  info_type;     // Sub-type: 0x00 = VIN, 0x01 = Cal ID, ...
-    uint8_t  segment;       // Segment index for multi-frame data
-    uint8_t  total_segments;// Total segments expected
-    uint8_t  data_len;      // Bytes of data in this segment
-    uint8_t  data[];        // Variable-length data
-} PayloadVehicleInfo;
+    char     vin[18];                   // VIN string (17 chars + null)
+    uint8_t  protocol;                  // OBD protocol (6 = ISO 15765-4 CAN)
+    uint8_t  ecu_count;                 // Number of responding ECUs
+    uint8_t  supported_pids[12];        // Bitmap of supported Mode 01 PIDs
+    uint16_t dtc_count;                 // Number of stored DTCs
+    uint8_t  mil_status;                // 0 = off, 1 = on (check engine light)
+    uint8_t  emission_dtc_count;        // Emission DTCs flagged by ECU (PID 0x01)
+    char     ecu_name[21];              // ECU name (Mode 09 PID 0x0A, 20 chars + null)
+    char     cal_id[17];               // Calibration ID (Mode 09 PID 0x04, 16 chars + null)
+    char     cvn[9];                    // CVN hex string (Mode 09 PID 0x06, 8 hex chars + null)
+} comm_vehicle_info_t;
 ```
 
-Long strings (e.g., a 17-character VIN) may span multiple segments. The
-receiver reassembles them using `segment` and `total_segments`.
+The receiver caches this struct and persists it to NVS. On next boot, NVS
+recall only succeeds if the stored blob size matches `sizeof(comm_vehicle_info_t)`,
+so struct layout changes safely invalidate old cached data.
 
 ---
 
@@ -166,21 +173,28 @@ receiver reassembles them using `segment` and `total_segments`.
 Diagnostic Trouble Codes read from the vehicle.
 
 ```c
+// DTC type bitmask — a single DTC may be stored AND pending AND permanent
+#define DTC_TYPE_STORED     0x01
+#define DTC_TYPE_PENDING    0x02
+#define DTC_TYPE_PERMANENT  0x04
+
 typedef struct __attribute__((packed)) {
-    uint8_t  dtc_count;     // Number of DTCs in this frame
-    uint8_t  more_available;// 1 if additional frames follow, 0 if last
-    struct __attribute__((packed)) {
-        uint16_t code;      // Raw DTC code (ISO 15031-6 encoding)
-        uint8_t  status;    // DTC status byte
-    } dtcs[];               // Flexible array of DTC entries
-} PayloadDtcList;
+    uint16_t code;          // Raw DTC code (ISO 15031-6 encoding)
+    uint8_t  type;          // Bitmask: DTC_TYPE_STORED | PENDING | PERMANENT
+    uint8_t  system;        // 0=powertrain, 1=chassis, 2=body, 3=network
+} comm_dtc_entry_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  dtc_count;                 // Number of DTCs
+    uint8_t  reserved[3];               // Padding
+    comm_dtc_entry_t dtcs[MAX_DTCS];    // DTC list (MAX_DTCS = 32)
+} comm_dtc_list_t;
 ```
 
-**Bytes per DTC entry:** 3.
-
-With UART transport there is no 250-byte frame limit, so large DTC lists
-can be sent in fewer frames than a wireless design would require. The
-`more_available` field is retained for flexibility.
+**Bytes per DTC entry:** 4. The `type` field is a bitmask—when the same DTC
+code appears in multiple modes (e.g., stored AND pending), the bits are OR'd
+together during dedup merge. The Display renders the combined type as a
+comma-separated string (e.g., "stored, pending").
 
 ---
 

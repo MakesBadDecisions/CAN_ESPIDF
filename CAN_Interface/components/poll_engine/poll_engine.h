@@ -78,7 +78,7 @@ typedef struct {
 
 #define POLL_ENGINE_CONFIG_DEFAULT() { \
     .max_outstanding = 3, \
-    .adaptive_interval = true, \
+    .adaptive_interval = false, \
     .persist_priorities = true, \
 }
 

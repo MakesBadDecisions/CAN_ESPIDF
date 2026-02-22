@@ -111,6 +111,7 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 - [x] Define `pid_entry_t` struct (pid, name, type, unit, formula, params, byte_count, service)
 - [x] Define formula types enum (RAW, LINEAR, BITFIELD, RATIO, etc.)
 - [x] Build unified pid_tables.c with compact format
+- [x] Fix PID 0x32 (Evap vapor pressure) -- changed from unsigned AB_DIV_N to signed AB_SIGNED_DIV_N (two's complement)
 - [x] Add OBD-II Mode 0x01 PIDs (0x00-0xA4) - 100+ entries
 - [x] Add GM Mode 0x22 PIDs - 68 entries (UNVERIFIED - need vehicle testing)
 - [x] Implement table access functions (pid_db_get_obd2_table, pid_db_get_gm_table)
@@ -122,6 +123,7 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 - [ ] Add PID supported-bitmap helpers (decode Mode 01 PID 0x00/0x20/0x40/... responses)
 - [ ] Validate GM PID addresses against actual vehicle responses
 - [ ] Validate table: no duplicate PIDs, all formulas produce values within min/max
+- [ ] Add O2 sensor CD voltage decode for PIDs 0x24-0x2B (needs dual-value formula architecture -- currently only AB lambda ratio decoded)
 
 ---
 
@@ -149,13 +151,17 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done.
 
 - [x] Define DTC entry struct (code string, status byte, freeze frame flag)
 - [x] Implement Mode 03 -- read stored DTCs, parse 2-byte DTC pairs into P/B/C/U codes
-- [ ] Implement Mode 07 -- read pending DTCs
+- [x] Implement Mode 07 -- read pending DTCs (obd2_read_pending_dtcs via read_dtcs_by_mode helper)
+- [x] Implement Mode 0A -- read permanent DTCs (obd2_read_permanent_dtcs, 50ms delay after Mode 07 for late CF)
 - [x] Implement Mode 04 -- clear DTCs (with confirmation/safety gate)
+- [x] DTC type bitmask -- DTC_TYPE_STORED|PENDING|PERMANENT merged on dedup (comm_protocol.h defines)
+- [x] Implement PID 0x01 monitor status -- obd2_read_monitor_status() decodes MIL lamp + emission DTC count
 - [ ] Implement UDS service 0x19 (ReadDTCInformation) sub-functions: reportDTCByStatusMask, reportDTCSnapshotRecord
 - [x] Implement VIN retrieval (Mode 09 PID 02) with ISO-TP multi-frame handling
-- [ ] Implement CVN retrieval (Mode 09 PID 06)
-- [ ] Implement ECU name retrieval (Mode 09 PID 0A)
-- [ ] Add DTC storage manager -- store last-read DTCs in RAM, optionally persist to NVS
+- [x] Implement ECU name retrieval (Mode 09 PID 0x0A) -- obd2_read_ecu_name, 20-char ASCII, trimmed
+- [x] Implement CalID retrieval (Mode 09 PID 0x04) -- obd2_read_cal_id, first 16-char calibration ID
+- [x] Implement CVN retrieval (Mode 09 PID 0x06) -- obd2_read_cvn, 4-byte hex string
+- [x] Add DTC storage manager -- store last-read DTCs in RAM (s_ctx.vehicle.dtcs[], sent to Display via comm_link)
 - [ ] Add UDS session control (0x10) and security access (0x27) stubs for future use
 - [x] Write `CMakeLists.txt`
 - [x] Implement ECU scan (discover responding ECUs 0x7E8-0x7EF)
@@ -178,9 +184,10 @@ No poll groups - each PID has individual priority setting.
 
 - [x] Define poll job struct (pid, priority 1-5, base_interval_ms, next_run_tick, last_value, changed_flag)
 - [x] Implement priority run queue (sorted by next_run_tick, tie-break by priority)
+- [x] Implement round-robin fairness for equal-priority jobs (last_poll_index tracking, scan wraps from last-polled position)
 - [x] Implement NVS priority storage (key: PID number, value: priority 1-5, default: 3)
 - [x] Implement scheduler tick: pop due jobs, submit OBD-II requests, update next_run_tick
-- [x] Implement adaptive interval logic: shorten interval on consistent success, lengthen on failure/timeout
+- [x] Implement adaptive interval logic: shorten interval on consistent success, lengthen on failure/timeout (disabled by default -- causes starvation)
 - [x] Add bandwidth limiter: max N outstanding requests, backpressure when TX queue is full
 - [x] Add PID enable/disable at runtime (from config or command from display node)
 - [x] Add priority change API (set_pid_priority, get_pid_priority) with NVS persistence
@@ -188,6 +195,9 @@ No poll groups - each PID has individual priority setting.
 - [x] Add statistics: average response time per PID, success rate, polls per second
 - [x] Write `CMakeLists.txt`
 - [x] Wire poll_engine to comm_link (forward PID values to display node via callback)
+- [x] Fix scheduler starvation bug: equal-priority PIDs monopolized by lowest array index (round-robin scan fix)
+- [x] Reduce inter-poll delay from 30ms to 1 tick (obd2_request_pid is blocking ~25-35ms, no artificial spacing needed)
+- [x] Verified: 20 PIDs cycling in round-robin order, ~45ms/PID, ~900ms full rotation, zero failures
 
 ---
 
@@ -202,6 +212,9 @@ No poll groups - each PID has individual priority setting.
 - [x] Add link detection: monitor UART RX for heartbeat from display node
 - [x] Add delivery tracking: maintain sequence numbers, log frame errors
 - [x] Handle CONFIG_CMD messages received from display node (poll list changes, scan requests)
+- [x] Handle CMD_READ_DTCS -- route to diagnostics_read_dtcs via scan_task, send comm_dtc_list_t back
+- [x] Handle CMD_CLEAR_DTCS -- route to diagnostics_clear_dtcs via scan_task, send empty DTC list back
+- [x] Fix comm_link_send_dtcs wire format -- uses comm_dtc_list_t with comm_dtc_entry_t entries (was ad-hoc [count|raw16...])
 - [x] Implement `comm_link_send_pid_metadata()` -- send PID name/unit batches to Display Node
 - [x] Write `CMakeLists.txt`
 

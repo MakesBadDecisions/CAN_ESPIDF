@@ -109,26 +109,96 @@ esp_err_t diagnostics_read_dtcs(diag_dtc_t *dtcs, uint8_t max_count, uint8_t *ou
     
     s_ctx.state = DIAG_STATE_READING_DTCS;
     
-    uint16_t raw_dtcs[DIAG_MAX_DTCS];
-    size_t count = 0;
+    // ── Read stored DTCs (Mode 03) ──
+    uint16_t stored_dtcs[DIAG_MAX_DTCS];
+    size_t stored_count = 0;
+    esp_err_t err = obd2_read_dtcs(stored_dtcs, DIAG_MAX_DTCS, &stored_count);
+    if (err != ESP_OK) {
+        SYS_LOGW(TAG, "Failed to read stored DTCs: %s", esp_err_to_name(err));
+        stored_count = 0;  // Continue to try pending
+    }
+    SYS_LOGI(TAG, "Stored DTCs: %zu", stored_count);
     
-    esp_err_t err = obd2_read_dtcs(raw_dtcs, DIAG_MAX_DTCS, &count);
+    // ── Read pending DTCs (Mode 07) ──
+    uint16_t pending_dtcs[DIAG_MAX_DTCS];
+    size_t pending_count = 0;
+    esp_err_t err2 = obd2_read_pending_dtcs(pending_dtcs, DIAG_MAX_DTCS, &pending_count);
+    if (err2 != ESP_OK) {
+        SYS_LOGW(TAG, "Failed to read pending DTCs: %s", esp_err_to_name(err2));
+        pending_count = 0;
+    }
+    SYS_LOGI(TAG, "Pending DTCs: %zu", pending_count);
+    
+    // Brief delay to let ECU finish any trailing consecutive frames from Mode 07
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // ── Read permanent DTCs (Mode 0A) ──
+    uint16_t permanent_dtcs[DIAG_MAX_DTCS];
+    size_t permanent_count = 0;
+    esp_err_t err3 = obd2_read_permanent_dtcs(permanent_dtcs, DIAG_MAX_DTCS, &permanent_count);
+    if (err3 != ESP_OK) {
+        SYS_LOGD(TAG, "Permanent DTCs not supported or failed: %s", esp_err_to_name(err3));
+        permanent_count = 0;  // Not all ECUs support Mode 0x0A
+    }
+    SYS_LOGI(TAG, "Permanent DTCs: %zu", permanent_count);
     
     s_ctx.state = DIAG_STATE_IDLE;
     
-    if (err != ESP_OK) {
-        SYS_LOGW(TAG, "Failed to read DTCs: %s", esp_err_to_name(err));
+    // If all failed, report error
+    if (err != ESP_OK && err2 != ESP_OK) {
         return ESP_FAIL;
     }
     
-    // Cache and convert to formatted codes
-    s_ctx.vehicle.dtc_count = (uint8_t)count;
+    // ── Combine stored + pending + permanent into cache (bitmask merge) ──
+    size_t total = 0;
+    uint16_t  combined_raw[DIAG_MAX_DTCS];
+    uint8_t   combined_type[DIAG_MAX_DTCS];
     
-    uint8_t copy_count = (count < max_count) ? (uint8_t)count : max_count;
+    for (size_t i = 0; i < stored_count && total < DIAG_MAX_DTCS; i++) {
+        combined_raw[total]  = stored_dtcs[i];
+        combined_type[total] = DTC_TYPE_STORED;
+        total++;
+    }
+    for (size_t i = 0; i < pending_count; i++) {
+        // If code already exists, merge type bits; otherwise add new entry
+        bool merged = false;
+        for (size_t j = 0; j < total; j++) {
+            if (pending_dtcs[i] == combined_raw[j]) {
+                combined_type[j] |= DTC_TYPE_PENDING;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && total < DIAG_MAX_DTCS) {
+            combined_raw[total]  = pending_dtcs[i];
+            combined_type[total] = DTC_TYPE_PENDING;
+            total++;
+        }
+    }
+    for (size_t i = 0; i < permanent_count; i++) {
+        // If code already exists, merge type bits; otherwise add new entry
+        bool merged = false;
+        for (size_t j = 0; j < total; j++) {
+            if (permanent_dtcs[i] == combined_raw[j]) {
+                combined_type[j] |= DTC_TYPE_PERMANENT;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && total < DIAG_MAX_DTCS) {
+            combined_raw[total]  = permanent_dtcs[i];
+            combined_type[total] = DTC_TYPE_PERMANENT;
+            total++;
+        }
+    }
     
-    for (size_t i = 0; i < count; i++) {
-        s_ctx.vehicle.dtcs[i].raw = raw_dtcs[i];
-        obd2_format_dtc(raw_dtcs[i], s_ctx.vehicle.dtcs[i].code);
+    s_ctx.vehicle.dtc_count = (uint8_t)total;
+    uint8_t copy_count = (total < max_count) ? (uint8_t)total : max_count;
+    
+    for (size_t i = 0; i < total; i++) {
+        s_ctx.vehicle.dtcs[i].raw = combined_raw[i];
+        s_ctx.vehicle.dtcs[i].type = combined_type[i];
+        obd2_format_dtc(combined_raw[i], s_ctx.vehicle.dtcs[i].code);
         
         if (dtcs && i < copy_count) {
             dtcs[i] = s_ctx.vehicle.dtcs[i];
@@ -138,10 +208,11 @@ esp_err_t diagnostics_read_dtcs(diag_dtc_t *dtcs, uint8_t max_count, uint8_t *ou
     s_ctx.vehicle.dtcs_valid = true;
     *out_count = copy_count;
     
-    // Send DTCs to display node
-    comm_link_send_dtcs(raw_dtcs, (uint8_t)count);
+    // Send combined DTCs to display node
+    comm_link_send_dtcs(combined_raw, combined_type, (uint8_t)total);
     
-    SYS_LOGI(TAG, "Read %zu DTCs", count);
+    SYS_LOGI(TAG, "Read %zu DTCs (stored=%zu pending=%zu permanent=%zu)",
+             total, stored_count, pending_count, permanent_count);
     return ESP_OK;
 }
 
@@ -162,6 +233,18 @@ esp_err_t diagnostics_clear_dtcs(void)
     
     SYS_LOGW(TAG, "Failed to clear DTCs: %s", esp_err_to_name(err));
     return ESP_FAIL;
+}
+
+esp_err_t diagnostics_read_monitor_status(bool *mil_on, uint8_t *dtc_count)
+{
+    // Read PID 0x01: Monitor status since DTCs cleared
+    // Byte A: bit 7 = MIL on/off, bits 6-0 = emission DTC count
+    esp_err_t err = obd2_read_monitor_status(mil_on, dtc_count);
+    if (err == ESP_OK) {
+        s_ctx.vehicle.mil_on = *mil_on;
+        s_ctx.vehicle.emission_dtc_count = *dtc_count;
+    }
+    return err;
 }
 
 esp_err_t diagnostics_scan_ecus(diag_ecu_t *ecus, uint8_t max_count, uint8_t *out_count)

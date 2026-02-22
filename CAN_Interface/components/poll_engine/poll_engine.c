@@ -37,6 +37,7 @@ static struct {
     poll_engine_config_t    config;
     poll_job_t              jobs[POLL_ENGINE_MAX_JOBS];
     uint8_t                 job_count;
+    int                     last_poll_index;  // Round-robin index for fair scheduling
     TaskHandle_t            task_handle;
     SemaphoreHandle_t       mutex;
     bool                    running;
@@ -124,13 +125,17 @@ static void poll_engine_task(void *arg)
             last_stats_tick = now;
         }
         
-        // Find next job due
+        // Find next job due (round-robin for fairness among equal-priority jobs)
         poll_job_t *next_job = NULL;
+        int next_job_index = -1;
         TickType_t min_wait = pdMS_TO_TICKS(100);  // Max sleep
         
         xSemaphoreTake(s_poll.mutex, portMAX_DELAY);
         
-        for (int i = 0; i < s_poll.job_count; i++) {
+        int count = s_poll.job_count;
+        for (int n = 0; n < count; n++) {
+            // Start scanning from one past the last polled job (round-robin)
+            int i = (s_poll.last_poll_index + 1 + n) % count;
             poll_job_t *job = &s_poll.jobs[i];
             
             if (!job->enabled) {
@@ -138,9 +143,10 @@ static void poll_engine_task(void *arg)
             }
             
             if (now >= job->next_poll_tick) {
-                // This job is due now
+                // This job is due — pick it if higher priority or first found
                 if (!next_job || job->priority > next_job->priority) {
                     next_job = job;
+                    next_job_index = i;
                 }
             } else {
                 // Calculate wait time
@@ -196,13 +202,16 @@ static void poll_engine_task(void *arg)
                 }
             }
             
-            // Schedule next poll
+            // Schedule next poll and advance round-robin index
             next_job->next_poll_tick = now + pdMS_TO_TICKS(next_job->interval_ms);
+            s_poll.last_poll_index = next_job_index;
         }
         
         xSemaphoreGive(s_poll.mutex);
         
         // Wait for next job or timeout
+        // Minimal yield between polls — obd2_request_pid() is blocking (~30ms)
+        // so natural spacing already exists between CAN requests
         vTaskDelay(next_job ? 1 : min_wait);
     }
     
@@ -227,6 +236,7 @@ esp_err_t poll_engine_init_with_config(const poll_engine_config_t *config)
     }
     
     memset(&s_poll, 0, sizeof(s_poll));
+    s_poll.last_poll_index = -1;  // Start round-robin from index 0
     
     if (config) {
         s_poll.config = *config;
@@ -521,6 +531,7 @@ esp_err_t poll_engine_clear_all(void)
     
     xSemaphoreTake(s_poll.mutex, portMAX_DELAY);
     s_poll.job_count = 0;
+    s_poll.last_poll_index = -1;
     s_poll.stats.active_jobs = 0;
     xSemaphoreGive(s_poll.mutex);
     

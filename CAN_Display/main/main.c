@@ -28,7 +28,10 @@
 #include "i2c_bus.h"
 #include "tca9554.h"
 #include "qmi8658.h"
+#include "pcf85063.h"
 #include "boot_splash.h"
+#include "wifi_manager.h"
+#include "pid_store.h"
 #include "esp_heap_caps.h"
 
 void app_main(void)
@@ -67,6 +70,14 @@ void app_main(void)
         }
     }
 
+    // Phase 0.7: RTC (if present on this board)
+    ret = pcf85063_init();
+    if (ret == ESP_OK) {
+        pcf85063_sync_to_system();  // Restore system clock from RTC
+    } else if (ret != ESP_ERR_NOT_SUPPORTED) {
+        SYS_LOGW("PCF85063 RTC init failed: %s", esp_err_to_name(ret));
+    }
+
     // Phase 1: Initialize display and LVGL
     ret = display_init();
     if (ret != ESP_OK) {
@@ -97,6 +108,14 @@ void app_main(void)
     if (ret != ESP_OK) {
         SYS_LOGW("SD card init failed - logging disabled: %s", esp_err_to_name(ret));
         // Non-fatal: continue without logging
+    }
+
+    // Phase 3.1: Load saved PID selection from SD card
+    int pid_loaded = pid_store_load();
+    if (pid_loaded > 0) {
+        SYS_LOGI("Loaded %d saved PID selections", pid_loaded);
+    } else {
+        SYS_LOGI("No saved PID selection (first boot or empty)");
     }
 
     // Phase 3.5: Boot splash from SD card (visible during remaining init)
@@ -163,7 +182,18 @@ void app_main(void)
 
     SYS_LOGI("=== Display Node Ready ===");
     SYS_LOGI("Free heap: %lu bytes", (unsigned long)sys_get_free_heap());
-    // TODO: Initialize wifi_manager (WiFi AP for config + log download)
+
+    // Phase 9: WiFi Manager (AP for config portal + log download)
+    ret = wifi_manager_init();
+    if (ret != ESP_OK) {
+        SYS_LOGW("WiFi manager init failed: %s (non-fatal)", esp_err_to_name(ret));
+    }
+
+    // Phase 9.1: Auto-poll check (if enabled and PID selection exists)
+    // TODO: Implement auto-poll trigger once scan-complete callback is available
+    // For now, auto-poll requires user to press Poll button on first boot
+    // After scan completes, if nvs_get_autopoll() && pid_store_has_selection(),
+    // the system could automatically start polling.
 
     // Main loop - periodic heap + link status (60s interval for overnight monitoring)
     uint32_t uptime_min = 0;

@@ -51,6 +51,9 @@ message by type.
 - `comm_link_get_state()` returns `COMM_LINK_CONNECTED` or `COMM_LINK_DISCONNECTED`
 - `comm_link_get_stats()` returns frame counters (rx, tx, pid updates, errors)
 - `comm_link_get_can_status()` returns remote CAN bus state from heartbeat (0=off, 1=running, 2=error)
+- `comm_link_get_remote_heap_kb()` returns CAN Interface free heap (KB) from heartbeat
+- `comm_link_get_remote_uptime_ms()` returns CAN Interface uptime (ms) from heartbeat
+- `comm_link_get_remote_node_state()` returns CAN Interface node state from heartbeat
 
 ## Files
 

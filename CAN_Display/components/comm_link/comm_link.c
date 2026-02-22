@@ -77,15 +77,24 @@ static struct {
     bool                vehicle_info_valid;
     scan_status_t       scan_status;
     uint8_t             remote_can_status;   // 0=bus off, 1=bus on, 2=error (from Interface heartbeat)
+    uint16_t            remote_heap_kb;      // Free heap from Interface heartbeat (KB)
+    uint32_t            remote_uptime_ms;    // Uptime from Interface heartbeat (ms)
+    uint8_t             remote_node_state;   // 0=idle, 1=scanning, 2=streaming
     SemaphoreHandle_t   vehicle_mutex;
     
     // PID metadata store (RAM only, repopulated each scan)
     pid_meta_entry_t    pid_meta[PID_META_STORE_MAX];
     int                 pid_meta_count;
     
+    // DTC cache (populated from Interface DTC list messages)
+    comm_dtc_entry_t    dtc_store[COMM_LINK_DTC_STORE_MAX];
+    uint8_t             dtc_count;
+    bool                dtc_valid;          // Has received a DTC list at least once
+    
     // Callbacks
     comm_pid_callback_t pid_callback;
     comm_scan_callback_t scan_callback;
+    comm_dtc_callback_t dtc_callback;
     
     // Statistics
     comm_link_stats_t   stats;
@@ -288,7 +297,10 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
             // Interface heartbeat - link alive + CAN status
             if (payload && header.payload_len >= sizeof(comm_heartbeat_t)) {
                 const comm_heartbeat_t *hb = (const comm_heartbeat_t *)payload;
-                s_ctx.remote_can_status = hb->can_status;
+                s_ctx.remote_can_status  = hb->can_status;
+                s_ctx.remote_heap_kb     = hb->free_heap_kb;
+                s_ctx.remote_uptime_ms   = hb->uptime_ms;
+                s_ctx.remote_node_state  = hb->node_state;
             }
             break;
             
@@ -336,8 +348,59 @@ static void process_rx_frame(const uint8_t *data, uint16_t len)
             break;
             
         case MSG_DTC_LIST:
-            // TODO: Store DTC list
-            ESP_LOGI(TAG, "DTC list received");
+            if (payload && header.payload_len >= 4) {
+                // Parse comm_dtc_list_t: [count(1) | reserved(3) | entries(4 each)]
+                const comm_dtc_list_t *dtc_list = (const comm_dtc_list_t *)payload;
+                uint8_t count = dtc_list->dtc_count;
+                
+                // Validate count against payload size
+                uint16_t expected = 4 + count * sizeof(comm_dtc_entry_t);
+                if (expected > header.payload_len) {
+                    count = (header.payload_len - 4) / sizeof(comm_dtc_entry_t);
+                }
+                if (count > COMM_LINK_DTC_STORE_MAX) {
+                    count = COMM_LINK_DTC_STORE_MAX;
+                }
+                
+                // Store DTCs
+                if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    s_ctx.dtc_count = count;
+                    if (count > 0) {
+                        memcpy(s_ctx.dtc_store, dtc_list->dtcs,
+                               count * sizeof(comm_dtc_entry_t));
+                    }
+                    s_ctx.dtc_valid = true;
+                    
+                    // Update dtc_count in vehicle_info for consistency
+                    if (s_ctx.vehicle_info_valid) {
+                        s_ctx.vehicle_info.dtc_count = count;
+                    }
+                    xSemaphoreGive(s_ctx.vehicle_mutex);
+                }
+                
+                ESP_LOGI(TAG, "DTC list received: %u DTCs", count);
+                
+                // Fire callback if registered
+                if (s_ctx.dtc_callback) {
+                    s_ctx.dtc_callback(count);
+                    s_ctx.dtc_callback = NULL;
+                }
+            } else if (payload == NULL || header.payload_len == 0) {
+                // Empty DTC response (no DTCs or clear confirmation)
+                if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    s_ctx.dtc_count = 0;
+                    s_ctx.dtc_valid = true;
+                    if (s_ctx.vehicle_info_valid) {
+                        s_ctx.vehicle_info.dtc_count = 0;
+                    }
+                    xSemaphoreGive(s_ctx.vehicle_mutex);
+                }
+                ESP_LOGI(TAG, "DTC list received: 0 DTCs");
+                if (s_ctx.dtc_callback) {
+                    s_ctx.dtc_callback(0);
+                    s_ctx.dtc_callback = NULL;
+                }
+            }
             break;
             
         case MSG_PID_METADATA:
@@ -689,6 +752,21 @@ uint8_t comm_link_get_can_status(void)
     return s_ctx.remote_can_status;
 }
 
+uint16_t comm_link_get_remote_heap_kb(void)
+{
+    return s_ctx.remote_heap_kb;
+}
+
+uint32_t comm_link_get_remote_uptime_ms(void)
+{
+    return s_ctx.remote_uptime_ms;
+}
+
+uint8_t comm_link_get_remote_node_state(void)
+{
+    return s_ctx.remote_node_state;
+}
+
 const comm_link_stats_t* comm_link_get_stats(void)
 {
     return &s_ctx.stats;
@@ -867,6 +945,11 @@ int comm_link_get_supported_pids(uint16_t *out_pids, int max_count)
 // Poll List API
 // ============================================================================
 
+// Local cache of the active poll list
+static uint16_t s_poll_cache[MAX_POLL_PIDS];
+static uint8_t  s_poll_cache_count = 0;
+static bool     s_poll_cache_valid = false;
+
 esp_err_t comm_link_set_poll_list(const uint16_t *pids, uint8_t count, uint8_t rate_hz)
 {
     if (!s_ctx.running) {
@@ -891,6 +974,12 @@ esp_err_t comm_link_set_poll_list(const uint16_t *pids, uint8_t count, uint8_t r
     memcpy(poll->pids, pids, count * sizeof(uint16_t));
     
     ESP_LOGI(TAG, "Setting poll list: %u PIDs @ %u Hz", count, rate_hz);
+
+    // Cache locally for filtering queries
+    memcpy(s_poll_cache, pids, count * sizeof(uint16_t));
+    s_poll_cache_count = count;
+    s_poll_cache_valid = true;
+
     return send_frame(MSG_CONFIG_CMD, buf, sizeof(comm_config_cmd_t) + sizeof(comm_poll_list_t));
 }
 
@@ -907,7 +996,100 @@ esp_err_t comm_link_clear_poll_list(void)
     cmd->data_len = 0;
     
     ESP_LOGI(TAG, "Clearing poll list");
+    s_poll_cache_count = 0;
+    s_poll_cache_valid = false;
     return send_frame(MSG_CONFIG_CMD, cmd_buf, sizeof(comm_config_cmd_t));
+}
+
+bool comm_link_has_poll_list(void)
+{
+    return s_poll_cache_valid && s_poll_cache_count > 0;
+}
+
+bool comm_link_is_pid_polled(uint16_t pid_id)
+{
+    if (!s_poll_cache_valid || s_poll_cache_count == 0) return true; // No filter
+    for (int i = 0; i < s_poll_cache_count; i++) {
+        if (s_poll_cache[i] == pid_id) return true;
+    }
+    return false;
+}
+
+// ============================================================================
+// DTC API
+// ============================================================================
+
+esp_err_t comm_link_request_dtcs(comm_dtc_callback_t callback)
+{
+    if (!s_ctx.running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    uint8_t cmd_buf[sizeof(comm_config_cmd_t)];
+    comm_config_cmd_t *cmd = (comm_config_cmd_t *)cmd_buf;
+    cmd->cmd_type = CMD_READ_DTCS;
+    cmd->reserved = 0;
+    cmd->data_len = 0;
+    
+    s_ctx.dtc_callback = callback;
+    
+    ESP_LOGI(TAG, "Requesting DTC read...");
+    return send_frame(MSG_CONFIG_CMD, cmd_buf, sizeof(comm_config_cmd_t));
+}
+
+esp_err_t comm_link_clear_dtcs(comm_dtc_callback_t callback)
+{
+    if (!s_ctx.running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    uint8_t cmd_buf[sizeof(comm_config_cmd_t)];
+    comm_config_cmd_t *cmd = (comm_config_cmd_t *)cmd_buf;
+    cmd->cmd_type = CMD_CLEAR_DTCS;
+    cmd->reserved = 0;
+    cmd->data_len = 0;
+    
+    s_ctx.dtc_callback = callback;
+    
+    ESP_LOGI(TAG, "Requesting DTC clear...");
+    return send_frame(MSG_CONFIG_CMD, cmd_buf, sizeof(comm_config_cmd_t));
+}
+
+int comm_link_get_dtcs(comm_dtc_entry_t *out_dtcs, int max_count)
+{
+    if (!out_dtcs || max_count <= 0) {
+        return 0;
+    }
+    
+    int count = 0;
+    if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (s_ctx.dtc_valid) {
+            count = (s_ctx.dtc_count < max_count) ? s_ctx.dtc_count : max_count;
+            if (count > 0) {
+                memcpy(out_dtcs, s_ctx.dtc_store, count * sizeof(comm_dtc_entry_t));
+            }
+        }
+        xSemaphoreGive(s_ctx.vehicle_mutex);
+    }
+    
+    return count;
+}
+
+int comm_link_get_dtc_count(void)
+{
+    int count = 0;
+    if (xSemaphoreTake(s_ctx.vehicle_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (s_ctx.dtc_valid) {
+            count = s_ctx.dtc_count;
+        }
+        xSemaphoreGive(s_ctx.vehicle_mutex);
+    }
+    return count;
+}
+
+bool comm_link_has_dtc_data(void)
+{
+    return s_ctx.dtc_valid;
 }
 
 // ============================================================================

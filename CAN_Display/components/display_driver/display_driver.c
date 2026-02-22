@@ -125,9 +125,9 @@ static void lvgl_task(void *pvParameters)
     ESP_LOGI(TAG, "LVGL task started");
 
     while (1) {
-        if (xSemaphoreTake(s_lvgl_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (xSemaphoreTakeRecursive(s_lvgl_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             lv_timer_handler();
-            xSemaphoreGive(s_lvgl_mutex);
+            xSemaphoreGiveRecursive(s_lvgl_mutex);
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -541,7 +541,7 @@ static esp_err_t lvgl_init(void)
 
     lv_init();
 
-    s_lvgl_mutex = xSemaphoreCreateMutex();
+    s_lvgl_mutex = xSemaphoreCreateRecursiveMutex();
     if (s_lvgl_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create LVGL mutex");
         return ESP_ERR_NO_MEM;
@@ -645,10 +645,10 @@ esp_err_t display_init(void)
 
 void display_clear(uint16_t color)
 {
-    if (s_lvgl_mutex && xSemaphoreTake(s_lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (s_lvgl_mutex && xSemaphoreTakeRecursive(s_lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         lv_obj_t *scr = lv_scr_act();
         lv_obj_set_style_bg_color(scr, lv_color_hex(color), 0);
-        xSemaphoreGive(s_lvgl_mutex);
+        xSemaphoreGiveRecursive(s_lvgl_mutex);
     }
 }
 
@@ -662,12 +662,12 @@ bool display_lock(uint32_t timeout_ms)
     if (s_lvgl_mutex == NULL) {
         return false;
     }
-    return xSemaphoreTake(s_lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    return xSemaphoreTakeRecursive(s_lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void display_unlock(void)
 {
     if (s_lvgl_mutex) {
-        xSemaphoreGive(s_lvgl_mutex);
+        xSemaphoreGiveRecursive(s_lvgl_mutex);
     }
 }

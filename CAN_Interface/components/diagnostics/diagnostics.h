@@ -22,6 +22,7 @@
 typedef struct {
     char        code[6];    // "P0123" format
     uint16_t    raw;        // Raw DTC value
+    uint8_t     type;       // 0=stored, 1=pending, 2=permanent
 } diag_dtc_t;
 
 typedef struct {
@@ -58,6 +59,9 @@ typedef struct {
     uint8_t     ecu_count;
     
     uint32_t    supported_pids[8];  // Bitmasks for PIDs 0x01-0xFF
+    
+    bool        mil_on;             // MIL (check engine) lamp status
+    uint8_t     emission_dtc_count; // DTCs flagged by ECU (PID 0x01)
 } diag_vehicle_info_t;
 
 // ============================================================================
@@ -111,6 +115,14 @@ esp_err_t diagnostics_scan_ecus(diag_ecu_t *ecus, uint8_t max_count, uint8_t *ou
  * @return true if supported
  */
 bool diagnostics_is_pid_supported(uint8_t pid);
+
+/**
+ * @brief Read monitor status (PID 0x01) — MIL lamp + DTC count
+ * @param mil_on Output: true if check engine light is on
+ * @param dtc_count Output: number of emission DTCs
+ * @return ESP_OK on success
+ */
+esp_err_t diagnostics_read_monitor_status(bool *mil_on, uint8_t *dtc_count);
 
 /**
  * @brief Get cached vehicle info

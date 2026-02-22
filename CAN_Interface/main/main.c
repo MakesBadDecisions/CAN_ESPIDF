@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -53,11 +54,51 @@ static void pid_value_callback(uint16_t pid, float value, uint8_t unit)
 static TaskHandle_t s_scan_task_handle = NULL;
 static volatile bool s_scan_pending = false;
 
+// Notification values to distinguish request types
+#define NOTIFY_SCAN_VEHICLE  1
+#define NOTIFY_READ_DTCS     2
+#define NOTIFY_CLEAR_DTCS    3
+
 static void scan_task(void *arg)
 {
     while (1) {
-        // Wait for scan request from cmd_callback
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // Wait for request from cmd_callback (value distinguishes operation)
+        uint32_t notify_val = 0;
+        xTaskNotifyWait(0, ULONG_MAX, &notify_val, portMAX_DELAY);
+
+        // Handle DTC read request
+        if (notify_val == NOTIFY_READ_DTCS) {
+            SYS_LOGI(TAG, "DTC read requested...");
+            diag_dtc_t dtcs[DIAG_MAX_DTCS];
+            uint8_t dtc_count = 0;
+            esp_err_t err = diagnostics_read_dtcs(dtcs, DIAG_MAX_DTCS, &dtc_count);
+            if (err == ESP_OK) {
+                SYS_LOGI(TAG, "Read %u DTCs", dtc_count);
+            } else {
+                SYS_LOGW(TAG, "DTC read failed: %s", esp_err_to_name(err));
+                // Send empty list so Display knows read completed
+                comm_link_send_dtcs(NULL, NULL, 0);
+            }
+            s_scan_pending = false;
+            continue;
+        }
+
+        // Handle DTC clear request
+        if (notify_val == NOTIFY_CLEAR_DTCS) {
+            SYS_LOGI(TAG, "DTC clear requested...");
+            esp_err_t err = diagnostics_clear_dtcs();
+            if (err == ESP_OK) {
+                SYS_LOGI(TAG, "DTCs cleared successfully");
+            } else {
+                SYS_LOGW(TAG, "DTC clear failed: %s", esp_err_to_name(err));
+            }
+            // Send updated (empty) DTC list back regardless
+            comm_link_send_dtcs(NULL, NULL, 0);
+            s_scan_pending = false;
+            continue;
+        }
+
+        // Default: vehicle scan (NOTIFY_SCAN_VEHICLE or legacy)
         
         SYS_LOGI(TAG, "Vehicle scan starting...");
         
@@ -102,6 +143,33 @@ static void scan_task(void *arg)
             strcpy(info.vin, "UNKNOWN_VIN_12345");
         }
         
+        // Read ECU Name (Mode 09 PID 0x0A)
+        ret = obd2_read_ecu_name(info.ecu_name, sizeof(info.ecu_name));
+        if (ret != ESP_OK) {
+            SYS_LOGD(TAG, "ECU name not available");
+            info.ecu_name[0] = '\0';
+        } else {
+            SYS_LOGI(TAG, "ECU Name: %s", info.ecu_name);
+        }
+        
+        // Read Calibration ID (Mode 09 PID 0x04)
+        ret = obd2_read_cal_id(info.cal_id, sizeof(info.cal_id));
+        if (ret != ESP_OK) {
+            SYS_LOGD(TAG, "CalID not available");
+            info.cal_id[0] = '\0';
+        } else {
+            SYS_LOGI(TAG, "CalID: %s", info.cal_id);
+        }
+        
+        // Read CVN (Mode 09 PID 0x06)
+        ret = obd2_read_cvn(info.cvn, sizeof(info.cvn));
+        if (ret != ESP_OK) {
+            SYS_LOGD(TAG, "CVN not available");
+            info.cvn[0] = '\0';
+        } else {
+            SYS_LOGI(TAG, "CVN: %s", info.cvn);
+        }
+        
         // Read supported PIDs bitmaps
         uint32_t bitmap;
         int pid_count = 0;
@@ -138,7 +206,20 @@ static void scan_task(void *arg)
         }
         
         info.protocol = 6;  // ISO 15765-4 CAN
-        info.dtc_count = 0; // TODO: read DTC count
+        
+        // Read monitor status (PID 0x01) — MIL lamp + DTC count
+        bool mil_on = false;
+        uint8_t emission_dtc_count = 0;
+        if (diagnostics_read_monitor_status(&mil_on, &emission_dtc_count) == ESP_OK) {
+            info.mil_status = mil_on ? 1 : 0;
+            info.emission_dtc_count = emission_dtc_count;
+            info.dtc_count = emission_dtc_count;
+            SYS_LOGI(TAG, "MIL=%s, Emission DTCs=%u", mil_on ? "ON" : "OFF", emission_dtc_count);
+        } else {
+            info.mil_status = 0;
+            info.emission_dtc_count = 0;
+            info.dtc_count = 0;
+        }
         
         SYS_LOGI(TAG, "Scan complete: VIN=%.17s, %d PIDs supported", info.vin, pid_count);
         
@@ -232,7 +313,7 @@ static void cmd_callback(comm_msg_type_t type, const uint8_t *payload, uint16_t 
             // Notify the scan task — don't block the rx_task with OBD2 calls
             s_scan_pending = true;
             if (s_scan_task_handle) {
-                xTaskNotifyGive(s_scan_task_handle);
+                xTaskNotify(s_scan_task_handle, NOTIFY_SCAN_VEHICLE, eSetValueWithOverwrite);
             } else {
                 SYS_LOGE(TAG, "Scan task not created!");
                 s_scan_pending = false;
@@ -252,11 +333,18 @@ static void cmd_callback(comm_msg_type_t type, const uint8_t *payload, uint16_t 
                 
                 // Add each PID as a poll job (mode 0x01 = standard OBD2)
                 uint8_t priority = 3;  // Medium priority
+                int added = 0;
                 for (int i = 0; i < poll->pid_count && i < MAX_POLL_PIDS; i++) {
-                    poll_engine_add_pid(0x01, poll->pids[i], priority);
+                    esp_err_t add_err = poll_engine_add_pid(0x01, poll->pids[i], priority);
+                    if (add_err == ESP_OK) {
+                        added++;
+                    } else {
+                        SYS_LOGW(TAG, "Failed to add PID 0x%04X: %s",
+                                 poll->pids[i], esp_err_to_name(add_err));
+                    }
                 }
                 
-                SYS_LOGI(TAG, "Added %u poll jobs", poll->pid_count);
+                SYS_LOGI(TAG, "Poll engine: %d/%u jobs active", added, poll->pid_count);
             }
             break;
         }
@@ -265,6 +353,42 @@ static void cmd_callback(comm_msg_type_t type, const uint8_t *payload, uint16_t 
             SYS_LOGI(TAG, "Clearing poll list");
             poll_engine_clear_all();
             break;
+            
+        case CMD_READ_DTCS: {
+            SYS_LOGI(TAG, "DTC read requested by Display");
+            
+            if (s_scan_pending) {
+                SYS_LOGW(TAG, "Scan/DTC operation in progress, ignoring");
+                break;
+            }
+            
+            s_scan_pending = true;
+            if (s_scan_task_handle) {
+                xTaskNotify(s_scan_task_handle, NOTIFY_READ_DTCS, eSetValueWithOverwrite);
+            } else {
+                SYS_LOGE(TAG, "Scan task not created!");
+                s_scan_pending = false;
+            }
+            break;
+        }
+        
+        case CMD_CLEAR_DTCS: {
+            SYS_LOGI(TAG, "DTC clear requested by Display");
+            
+            if (s_scan_pending) {
+                SYS_LOGW(TAG, "Scan/DTC operation in progress, ignoring");
+                break;
+            }
+            
+            s_scan_pending = true;
+            if (s_scan_task_handle) {
+                xTaskNotify(s_scan_task_handle, NOTIFY_CLEAR_DTCS, eSetValueWithOverwrite);
+            } else {
+                SYS_LOGE(TAG, "Scan task not created!");
+                s_scan_pending = false;
+            }
+            break;
+        }
             
         default:
             SYS_LOGD(TAG, "Unhandled config cmd: 0x%02X", cmd->cmd_type);
